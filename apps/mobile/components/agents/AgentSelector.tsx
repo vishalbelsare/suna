@@ -1,17 +1,25 @@
-import { Text } from '@/components/ui/text';
 import { Icon } from '@/components/ui/icon';
 import { ChevronDown } from 'lucide-react-native';
 import * as React from 'react';
-import { Pressable, View } from 'react-native';
-import Animated, { 
-  useAnimatedStyle, 
-  useSharedValue, 
-  withSpring 
-} from 'react-native-reanimated';
-import { AgentAvatar } from './AgentAvatar';
+import { Platform, TouchableOpacity, View } from 'react-native';
 import { useAgent } from '@/contexts/AgentContext';
+import { ModeLogo } from '@/components/models/ModeLogo';
 
-const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+// Android hit slop for better touch targets
+const ANDROID_HIT_SLOP = Platform.OS === 'android' ? { top: 10, bottom: 10, left: 10, right: 10 } : undefined;
+
+/**
+ * Helper to determine if a model ID is "advanced" (power) mode
+ */
+function isAdvancedModel(modelId: string | undefined): boolean {
+  if (!modelId) return false;
+  return (
+    modelId === 'kortix/power' ||
+    modelId === 'kortix-power' ||
+    modelId.includes('claude-sonnet-4-5') ||
+    modelId.includes('sonnet')
+  );
+}
 
 interface AgentSelectorProps {
   onPress?: () => void;
@@ -19,84 +27,59 @@ interface AgentSelectorProps {
 }
 
 /**
- * AgentSelector Component
- * Displays current agent with avatar and name, opens drawer on press
+ * AgentSelector - Shows Basic or Advanced mode toggle
  * 
- * Compact mode: Shows only avatar with small chevron overlay (minimal space)
- * Full mode: Shows avatar, name, and chevron (default)
+ * Displays the current mode (Basic/Advanced) based on selected model.
+ * Tapping opens the agent drawer where user can switch modes.
  */
 export function AgentSelector({ onPress, compact = true }: AgentSelectorProps) {
-  const { getCurrentAgent } = useAgent();
-  const agent = getCurrentAgent();
-  const scale = useSharedValue(1);
+  const { selectedModelId, isLoading, hasInitialized } = useAgent();
 
-  const animatedStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: scale.value }],
-  }));
-
-  // Show loading state if no agent is selected yet
-  if (!agent) {
+  // Show loading state until initialization is complete
+  if (isLoading || !hasInitialized) {
     return (
-      <View className="flex-row items-center gap-1.5 bg-secondary/50 rounded-full px-3 py-1.5 border border-border/30">
-        <View className="w-6 h-6 bg-muted rounded-full animate-pulse" />
-        <Text className="text-muted-foreground text-sm font-roobert-medium">Loading...</Text>
+      <View className="flex-row items-center gap-1.5 rounded-full px-3.5 py-2">
+        <View className="w-16 h-4 bg-muted rounded animate-pulse" />
       </View>
     );
   }
 
+  const isAdvanced = isAdvancedModel(selectedModelId);
+  const mode = isAdvanced ? 'advanced' : 'basic';
+
   if (compact) {
-    // Minimal version: just avatar with chevron badge
     return (
-      <AnimatedPressable 
-        onPressIn={() => {
-          scale.value = withSpring(0.95, { damping: 15, stiffness: 400 });
-        }}
-        onPressOut={() => {
-          scale.value = withSpring(1, { damping: 15, stiffness: 400 });
-        }}
+      <TouchableOpacity
         onPress={onPress}
-        className="relative"
-        style={animatedStyle}
+        style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}
+        hitSlop={ANDROID_HIT_SLOP}
+        activeOpacity={0.7}
       >
-        <AgentAvatar agent={agent} size={24} />
-        {/* Small chevron indicator */}
-        <View className="absolute -bottom-0.5 -right-0.5 bg-secondary rounded-full items-center justify-center" style={{ width: 12, height: 12 }}>
-          <Icon 
-            as={ChevronDown} 
-            size={8} 
-            className="text-foreground"
-            strokeWidth={2.5}
-          />
-        </View>
-      </AnimatedPressable>
+        <ModeLogo mode={mode} height={10} />
+        <Icon
+          as={ChevronDown}
+          size={9}
+          className="text-foreground/60"
+          strokeWidth={2}
+        />
+      </TouchableOpacity>
     );
   }
 
-  // Full version with name
   return (
-    <AnimatedPressable 
-      onPressIn={() => {
-        scale.value = withSpring(0.95, { damping: 15, stiffness: 400 });
-      }}
-      onPressOut={() => {
-        scale.value = withSpring(1, { damping: 15, stiffness: 400 });
-      }}
+    <TouchableOpacity
       onPress={onPress}
-      className="flex-row items-center gap-1.5 bg-secondary/50 rounded-full px-3 py-1.5 border border-border/30"
-      style={animatedStyle}
+      style={{ flexDirection: 'row', alignItems: 'center', gap: 5, borderRadius: 16, paddingHorizontal: 12, paddingVertical: 6 }}
+      hitSlop={ANDROID_HIT_SLOP}
+      activeOpacity={0.7}
     >
-      {/* Agent info with avatar */}
-      <AgentAvatar agent={agent} size={18} />
-      <Text className="text-foreground text-sm font-roobert-medium">{agent.name}</Text>
-      
-      {/* Chevron down */}
-      <Icon 
-        as={ChevronDown} 
-        size={12} 
+      <ModeLogo mode={mode} height={13} />
+      <Icon
+        as={ChevronDown}
+        size={10}
         className="text-foreground/60"
         strokeWidth={2}
       />
-    </AnimatedPressable>
+    </TouchableOpacity>
   );
 }
-

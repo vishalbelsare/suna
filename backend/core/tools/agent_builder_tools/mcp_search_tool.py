@@ -13,7 +13,29 @@ from core.utils.logger import logger
     icon="Plug",
     color="bg-blue-100 dark:bg-blue-800/50",
     weight=170,
-    visible=True
+    visible=True,
+    usage_guide="""
+### MCP INTEGRATION SEARCH
+
+**CAPABILITIES:**
+- Search for available MCP integrations (GitHub, Slack, Gmail, etc.)
+- Get MCP server details and authentication methods
+- Discover available tools after authentication
+
+**SEARCH RULES:**
+- Search ONLY ONE app at a time
+- Get detailed info before proceeding
+
+**AVAILABLE INTEGRATIONS:**
+- GitHub, Slack, Gmail, Linear, Notion, Google Drive, and many more
+
+**WORKFLOW:**
+1. search_mcp_servers() - Find integrations
+2. get_mcp_server_details() - View auth methods
+3. Create credential profile
+4. User authenticates
+5. discover_user_mcp_servers() - Get actual available tools
+"""
 )
 class MCPSearchTool(AgentBuilderBaseTool):
     def __init__(self, thread_manager: ThreadManager, db_connection, agent_id: str):
@@ -23,13 +45,13 @@ class MCPSearchTool(AgentBuilderBaseTool):
         "type": "function",
         "function": {
             "name": "search_mcp_servers",
-            "description": "Search for Composio toolkits based on user requirements. Use this when the user wants to add MCP tools to their agent.",
+            "description": "Search for Composio toolkits and return exact toolkit_slug values. This must be the first tool call before any create_credential_profile call.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search query for finding relevant Composio toolkits (e.g., 'linear', 'github', 'database', 'search')"
+                        "description": "Search query for finding relevant Composio toolkits (e.g., 'gmail', 'google calendar', 'googledrive', 'github', 'linear')."
                     },
                     "limit": {
                         "type": "integer",

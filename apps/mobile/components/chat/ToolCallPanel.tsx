@@ -1,22 +1,19 @@
-/**
- * Tool Call Panel
- * 
- * Bottom drawer displaying detailed tool call information.
- * Supports navigation between multiple tool calls.
- */
-
 import React, { useState, useMemo, useCallback } from 'react';
-import { View, Pressable } from 'react-native';
+import { View } from 'react-native';
 import { Text } from '@/components/ui/text';
 import { Icon } from '@/components/ui/icon';
+import { Button } from '@/components/ui/button';
 import type { UnifiedMessage } from '@/api/types';
-import { parseToolMessage } from '@/lib/utils/tool-parser';
+import { extractToolCallAndResult } from '@/lib/utils/tool-data-extractor';
 import { getToolViewComponent } from './tool-views';
-import BottomSheet, { BottomSheetBackdrop, BottomSheetScrollView } from '@gorhom/bottom-sheet';
+import { ToolHeader } from './tool-views/shared/ToolHeader';
+import { getToolMetadata } from './tool-views/tool-metadata';
+import BottomSheet, { BottomSheetBackdrop, BottomSheetScrollView, TouchableOpacity as BottomSheetTouchable } from '@gorhom/bottom-sheet';
 import type { BottomSheetBackdropProps } from '@gorhom/bottom-sheet';
-import { useColorScheme } from 'nativewind';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import { X, ChevronLeft, ChevronRight } from 'lucide-react-native';
+import { log } from '@/lib/logger';
 
 export interface ToolMessagePair {
   assistantMessage: UnifiedMessage | null;
@@ -28,53 +25,82 @@ interface ToolCallPanelProps {
   onClose: () => void;
   toolMessages: ToolMessagePair[];
   initialIndex?: number;
+  project?: {
+    id: string;
+    name: string;
+    sandbox?: {
+      vnc_preview?: string;
+      sandbox_url?: string;
+      id?: string;
+      pass?: string;
+    };
+  };
+  /** Handler to auto-fill chat input with a prompt (closes panel and fills input) */
+  onPromptFill?: (prompt: string) => void;
 }
 
-/**
- * Tool Call Panel Component
- */
 export function ToolCallPanel({
   visible,
   onClose,
   toolMessages,
   initialIndex = 0,
+  project,
+  onPromptFill,
 }: ToolCallPanelProps) {
   const bottomSheetRef = React.useRef<BottomSheet>(null);
   const snapPoints = React.useMemo(() => ['85%'], []);
-  const { colorScheme } = useColorScheme();
+  const insets = useSafeAreaInsets();
   const [currentIndex, setCurrentIndex] = useState(initialIndex);
 
-  // Reset index when panel opens
   React.useEffect(() => {
     if (visible) {
       setCurrentIndex(initialIndex);
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      console.log('📳 Haptic Feedback: Tool Drawer Opened');
+      log.log('📳 Haptic Feedback: Tool Drawer Opened');
       bottomSheetRef.current?.snapToIndex(0);
     } else {
       bottomSheetRef.current?.close();
     }
   }, [visible, initialIndex]);
 
-  // Get current tool data
   const currentPair = toolMessages[currentIndex];
-  
-  const toolData = useMemo(() => {
-    if (!currentPair?.toolMessage) return null;
-    return parseToolMessage(currentPair.toolMessage.content);
+
+  // Extract tool call and tool result from messages
+  const { toolCall, toolResult, isSuccess, assistantTimestamp, toolTimestamp } = useMemo(() => {
+    if (!currentPair?.toolMessage) return { toolCall: null, toolResult: null, isSuccess: false, assistantTimestamp: undefined, toolTimestamp: undefined };
+    return extractToolCallAndResult(currentPair.assistantMessage, currentPair.toolMessage);
   }, [currentPair]);
 
-  const { toolName } = toolData || { toolName: 'Error' };
+  const toolName = useMemo(() => {
+    if (!toolCall || !toolCall.function_name) return 'Error';
+    return toolCall.function_name.replace(/_/g, '-');
+  }, [toolCall]);
 
   const ToolViewComponent = useMemo(() => {
     return getToolViewComponent(toolName);
   }, [toolName]);
 
-  // Navigation handlers
+  // Get tool metadata for header
+  const toolMetadata = useMemo(() => {
+    if (!toolCall || !toolCall.function_name) return null;
+    const args = typeof toolCall.arguments === 'object' && toolCall.arguments !== null
+      ? toolCall.arguments
+      : typeof toolCall.arguments === 'string'
+        ? (() => {
+          try {
+            return JSON.parse(toolCall.arguments);
+          } catch {
+            return {};
+          }
+        })()
+        : {};
+    return getToolMetadata(toolCall.function_name, args);
+  }, [toolCall]);
+
   const handlePrev = useCallback(() => {
     if (currentIndex > 0) {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      console.log('◀️ Tool Navigation: Previous', { from: currentIndex, to: currentIndex - 1 });
+      log.log('◀️ Tool Navigation: Previous', { from: currentIndex, to: currentIndex - 1 });
       setCurrentIndex(currentIndex - 1);
     }
   }, [currentIndex]);
@@ -82,16 +108,24 @@ export function ToolCallPanel({
   const handleNext = useCallback(() => {
     if (currentIndex < toolMessages.length - 1) {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      console.log('▶️ Tool Navigation: Next', { from: currentIndex, to: currentIndex + 1 });
+      log.log('▶️ Tool Navigation: Next', { from: currentIndex, to: currentIndex + 1 });
       setCurrentIndex(currentIndex + 1);
     }
   }, [currentIndex, toolMessages.length]);
 
   const handleClose = useCallback(() => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    console.log('❌ Tool Drawer Closed');
+    log.log('❌ Tool Drawer Closed');
     onClose();
   }, [onClose]);
+
+  // Handler to auto-fill chat input - closes panel and fills input
+  const handlePromptFill = useCallback((prompt: string) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    log.log('📝 Prompt fill triggered:', prompt);
+    onClose(); // Close the panel first
+    onPromptFill?.(prompt); // Then fill the chat input
+  }, [onClose, onPromptFill]);
 
   const renderBackdrop = useCallback(
     (props: BottomSheetBackdropProps) => (
@@ -99,7 +133,7 @@ export function ToolCallPanel({
         {...props}
         disappearsOnIndex={-1}
         appearsOnIndex={0}
-        opacity={0.5}
+        opacity={0.7}
         pressBehavior="close"
       />
     ),
@@ -123,11 +157,7 @@ export function ToolCallPanel({
       enablePanDownToClose
       onChange={handleSheetChange}
       backdropComponent={renderBackdrop}
-      backgroundStyle={{ 
-        backgroundColor: colorScheme === 'dark' ? '#161618' : '#FFFFFF'
-      }}
-      handleIndicatorStyle={{ 
-        backgroundColor: colorScheme === 'dark' ? '#3F3F46' : '#D4D4D8',
+      handleIndicatorStyle={{
         width: 36,
         height: 5,
         borderRadius: 3,
@@ -138,116 +168,109 @@ export function ToolCallPanel({
       style={{
         borderTopLeftRadius: 24,
         borderTopRightRadius: 24,
-        overflow: 'hidden'
+        overflow: 'hidden',
       }}
     >
-      {/* Header */}
-      <View className="border-b border-border bg-card px-6 pb-4 pt-6">
-        <View className="flex-row items-center justify-between">
-          <View className="flex-1">
-            <Text className="text-lg font-roobert-semibold text-foreground" numberOfLines={1}>
-              {toolName}
-            </Text>
-          </View>
-
-          <Pressable
-            onPress={handleClose}
-            className="p-2 rounded-full bg-secondary active:bg-secondary/80"
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          >
-            <Icon as={X} size={20} className="text-foreground/60" />
-          </Pressable>
-        </View>
-      </View>
-
-      {/* Content */}
-      <BottomSheetScrollView 
-        className="flex-1"
+      <BottomSheetScrollView
+        className="flex-1 bg-background"
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 20 }}
+        contentContainerStyle={{
+          paddingBottom: 20,
+        }}
       >
-        {!currentPair || !toolData ? (
+        {!currentPair || !toolCall || !toolCall.function_name ? (
           <View className="flex-1 justify-center items-center px-6 py-12">
-            <Text className="text-foreground font-roobert-semibold text-lg mb-4">
+            <Text className="text-primary font-roobert-semibold text-lg mb-4">
               Error Loading Tool Data
             </Text>
-            <Text className="text-foreground/60 text-center font-roobert">
+            <Text className="text-primary opacity-50 text-center font-roobert">
               Unable to parse tool execution data
             </Text>
           </View>
         ) : (
-          <ToolViewComponent
-            toolData={toolData}
-            assistantMessage={currentPair.assistantMessage}
-            toolMessage={currentPair.toolMessage}
-          />
+          <View className="flex-1">
+            {/* Standardized Tool Header */}
+            {toolMetadata && (
+              <View className="px-6 pt-4 pb-6">
+                <ToolHeader
+                  icon={toolMetadata.icon}
+                  iconColor={toolMetadata.iconColor}
+                  iconBgColor={toolMetadata.iconBgColor}
+                  subtitle={toolMetadata.subtitle}
+                  title={toolMetadata.title}
+                  isSuccess={toolResult?.success !== false}
+                  showStatus={true}
+                  isStreaming={false}
+                />
+              </View>
+            )}
+
+            {/* Tool View Content */}
+            <ToolViewComponent
+              toolCall={toolCall}
+              toolResult={toolResult || undefined}
+              assistantMessage={currentPair.assistantMessage}
+              toolMessage={currentPair.toolMessage}
+              assistantTimestamp={currentPair.assistantMessage?.created_at}
+              toolTimestamp={currentPair.toolMessage?.created_at}
+              isSuccess={toolResult?.success !== false}
+              currentIndex={currentIndex}
+              totalCalls={toolMessages.length}
+              project={project}
+              threadId={currentPair.toolMessage?.thread_id || currentPair.assistantMessage?.thread_id}
+              onPromptFill={handlePromptFill}
+            />
+          </View>
         )}
       </BottomSheetScrollView>
 
-      {/* Footer Navigation */}
       {toolMessages.length > 1 && (
-        <View className="border-t border-border bg-card px-6 py-3">
-          <View className="flex-row items-center justify-between">
-            {/* Previous Button */}
-            <Pressable
+        <View
+          className="px-6 pt-3 border-t border-border bg-background"
+          style={{
+            paddingBottom: Math.max(insets.bottom, 12),
+          }}
+        >
+          <View className="flex-row items-center justify-between gap-3">
+            <Button
               onPress={handlePrev}
               disabled={isPrevDisabled}
-              className={`flex-row items-center px-4 py-2 rounded-xl ${
-                isPrevDisabled
-                  ? 'bg-secondary/50 opacity-40'
-                  : 'bg-secondary active:bg-secondary/80'
-              }`}
-              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              variant="default"
+              size="sm"
+              className="rounded-2xl px-4"
             >
-              <Icon 
-                as={ChevronLeft} 
-                size={16} 
-                className={isPrevDisabled ? 'text-foreground/30' : 'text-foreground/60'} 
+              <Icon
+                as={ChevronLeft}
+                size={14}
+                className="text-background"
               />
-              <Text 
-                className={`text-sm ml-1 font-roobert-medium ${
-                  isPrevDisabled 
-                    ? 'text-foreground/30' 
-                    : 'text-foreground/60'
-                }`}
-              >
+              <Text className="text-sm font-roobert-medium text-background">
                 Prev
               </Text>
-            </Pressable>
+            </Button>
 
-            {/* Counter */}
-            <View className="px-4">
-              <Text className="text-sm font-roobert-semibold text-foreground tabular-nums">
+            <View className="px-2">
+              <Text className="text-sm font-roobert-semibold text-primary tabular-nums">
                 {currentIndex + 1}/{toolMessages.length}
               </Text>
             </View>
 
-            {/* Next Button */}
-            <Pressable
+            <Button
               onPress={handleNext}
               disabled={isNextDisabled}
-              className={`flex-row items-center px-4 py-2 rounded-xl ${
-                isNextDisabled
-                  ? 'bg-secondary/50 opacity-40'
-                  : 'bg-secondary active:bg-secondary/80'
-              }`}
-              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              variant="default"
+              size="sm"
+              className="rounded-2xl px-4"
             >
-              <Text 
-                className={`text-sm mr-1 font-roobert-medium ${
-                  isNextDisabled
-                    ? 'text-foreground/30' 
-                    : 'text-foreground/60'
-                }`}
-              >
+              <Text className="text-sm font-roobert-medium text-background">
                 Next
               </Text>
-              <Icon 
-                as={ChevronRight} 
-                size={16} 
-                className={isNextDisabled ? 'text-foreground/30' : 'text-foreground/60'} 
+              <Icon
+                as={ChevronRight}
+                size={14}
+                className="text-background"
               />
-            </Pressable>
+            </Button>
           </View>
         </View>
       )}

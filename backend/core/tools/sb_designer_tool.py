@@ -2,11 +2,12 @@ from typing import Optional
 from core.agentpress.tool import ToolResult, openapi_schema, tool_metadata
 from core.sandbox.tool_base import SandboxToolsBase
 from core.agentpress.thread_manager import ThreadManager
-import httpx
+from core.services.http_client import get_http_client
 from io import BytesIO
 import uuid
 from litellm import aimage_generation, aimage_edit
 import base64
+from core.utils.file_name_generator import generate_smart_filename
 
 @tool_metadata(
     display_name="Design & Graphics",
@@ -21,7 +22,6 @@ class SandboxDesignerTool(SandboxToolsBase):
         super().__init__(project_id, thread_manager)
         self.thread_id = thread_id
         self.thread_manager = thread_manager
-        self.designs_dir = "/workspace/designs"
         
         self.social_media_sizes = {
             "instagram_square": (1080, 1080),
@@ -61,6 +61,11 @@ class SandboxDesignerTool(SandboxToolsBase):
             "flyer_a4": (2480, 3508),
             "poster_a3": (3508, 4961),
         }
+    
+    @property
+    def designs_dir(self) -> str:
+        """Get the designs directory path based on workspace_path."""
+        return f"{self.workspace_path}/designs"
         
     async def _ensure_designs_directory(self):
         await self._ensure_sandbox()
@@ -118,6 +123,10 @@ class SandboxDesignerTool(SandboxToolsBase):
                             "enum": ["low", "medium", "high", "auto"],
                             "description": "Output quality. 'high' for best quality, 'auto' to let model decide. Default: 'auto'",
                         },
+                        "add_to_canvas": {
+                            "type": "string",
+                            "description": "Optional: Canvas name to automatically add the generated image to (e.g., 'project-mockup'). The canvas must already exist.",
+                        },
                     },
                     "required": ["mode", "prompt", "platform_preset"],
                 },
@@ -134,6 +143,7 @@ class SandboxDesignerTool(SandboxToolsBase):
         design_style: Optional[str] = None,
         image_path: Optional[str] = None,
         quality: str = "auto",
+        add_to_canvas: Optional[str] = None,
     ) -> ToolResult:
         try:
             await self._ensure_designs_directory()
@@ -153,7 +163,7 @@ class SandboxDesignerTool(SandboxToolsBase):
 
             if mode == "create":
                 response = await aimage_generation(
-                    model="gpt-image-1",
+                    model="gpt-image-1.5",
                     prompt=enhanced_prompt,
                     n=1,
                     size=size_string,
@@ -173,14 +183,14 @@ class SandboxDesignerTool(SandboxToolsBase):
                 response = await aimage_edit(
                     image=[image_io],  
                     prompt=enhanced_prompt,
-                    model="gpt-image-1",
+                    model="gpt-image-1.5",
                     n=1,
                     size=size_string,
                 )
             else:
                 return self.fail_response("Invalid mode. Use 'create' or 'edit'.")
 
-            design_path = await self._process_design_response(response, actual_width, actual_height)
+            design_path = await self._process_design_response(response, actual_width, actual_height, prompt, platform_preset)
             if isinstance(design_path, ToolResult):  
                 return design_path
 
@@ -191,7 +201,7 @@ class SandboxDesignerTool(SandboxToolsBase):
             await self._ensure_sandbox()
             sandbox_file_url = f"/api/sandboxes/{self.sandbox_id}/files?path={design_path.lstrip('/')}"
             
-            return self.success_response({
+            response_data = {
                 "success": True,
                 "design_path": design_path,
                 "design_url": sandbox_file_url,
@@ -201,7 +211,40 @@ class SandboxDesignerTool(SandboxToolsBase):
                 "style": design_style,
                 "quality": quality,
                 "message": f"Successfully created professional design{platform_text} ({dimensions_text}){style_text}. Design saved at: {design_path}"
-            })
+            }
+
+            # If add_to_canvas is specified, add the image to the canvas
+            if add_to_canvas:
+                try:
+                    from core.tools.sb_canvas_tool import SandboxCanvasTool
+                    canvas_tool = SandboxCanvasTool(self.project_id, self.thread_manager)
+                    
+                    # Sanitize canvas name
+                    safe_canvas_name = "".join(c for c in add_to_canvas if c.isalnum() or c in "-_").lower()
+                    canvas_path = f"canvases/{safe_canvas_name}.kanvax"
+                    
+                    # Add image to canvas
+                    add_result = await canvas_tool.add_image_to_canvas(
+                        canvas_path=canvas_path,
+                        image_path=design_path,
+                        x=100,
+                        y=100,
+                        width=actual_width,
+                        height=actual_height
+                    )
+                    
+                    if add_result.success:
+                        response_data["canvas_path"] = canvas_path
+                        response_data["added_to_canvas"] = True
+                        response_data["message"] += f" Image added to canvas '{add_to_canvas}'."
+                    else:
+                        response_data["added_to_canvas"] = False
+                        response_data["canvas_error"] = add_result.output
+                except Exception as e:
+                    response_data["added_to_canvas"] = False
+                    response_data["canvas_error"] = str(e)
+            
+            return self.success_response(response_data)
 
         except Exception as e:
             return self.fail_response(
@@ -293,7 +336,7 @@ class SandboxDesignerTool(SandboxToolsBase):
 
     async def _download_image_from_url(self, url: str) -> bytes | ToolResult:
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.get(url)
                 response.raise_for_status()
                 return response.content
@@ -318,13 +361,24 @@ class SandboxDesignerTool(SandboxToolsBase):
                 f"Could not read design file from sandbox: {image_path} - {str(e)}"
             )
 
-    async def _process_design_response(self, response, width: int, height: int) -> str | ToolResult:
+    async def _process_design_response(self, response, width: int, height: int, prompt: str = "", platform: str = "") -> str | ToolResult:
         try:
             original_b64_str = response.data[0].b64_json
             image_data = base64.b64decode(original_b64_str)
 
-            random_filename = f"design_{width}x{height}_{uuid.uuid4().hex[:8]}.png"
-            full_path = f"{self.designs_dir}/{random_filename}"
+            # Generate smart filename based on the design prompt
+            if prompt:
+                smart_filename = await generate_smart_filename(
+                    prompt=prompt,
+                    file_type="image",
+                    extension="png"
+                )
+            else:
+                # Fallback with platform info
+                platform_title = platform.replace('_', ' ').title() if platform else 'Custom'
+                smart_filename = f"{platform_title} Design.png"
+            
+            full_path = f"{self.designs_dir}/{smart_filename}"
 
             await self.sandbox.fs.upload_file(image_data, full_path)
             

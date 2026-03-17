@@ -2,20 +2,22 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from typing import Dict, Any, Optional
 from pydantic import BaseModel
-from uuid import uuid4
+from uuid import uuid4, UUID
 from core.utils.auth_utils import verify_and_get_user_id_from_jwt, get_optional_current_user_id_from_jwt
 from core.utils.logger import logger
+from core.utils.config import config, EnvMode
 from core.services.supabase import DBConnection
+from core.services.http_client import get_http_client
 from datetime import datetime
 import os
 import hmac
-import httpx
 import asyncio
 import json
 import hashlib
 import time
 import re
 import base64
+import httpx
 
 from .composio_service import (
     get_integration_service,
@@ -450,7 +452,7 @@ async def get_profile_mcp_config(
 ) -> Dict[str, Any]:
     try:
         profile_service = ComposioProfileService(db)
-        mcp_config = await profile_service.get_mcp_config_for_agent(profile_id)
+        mcp_config = await profile_service.get_mcp_config_for_agent(profile_id, account_id=current_user_id)
         
         return {
             "success": True,
@@ -513,7 +515,7 @@ async def discover_composio_tools(
 ) -> Dict[str, Any]:
     try:
         profile_service = ComposioProfileService(db)
-        config = await profile_service.get_profile_config(profile_id)
+        config = await profile_service.get_profile_config(profile_id, account_id=current_user_id)
         
         if config.get('type') != 'composio':
             raise HTTPException(status_code=400, detail="Not a Composio profile")
@@ -581,6 +583,45 @@ async def get_toolkit_icon(
     
     except Exception as e:
         logger.error(f"Error getting toolkit icon: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/toolkits/icons/batch")
+async def get_toolkit_icons_batch(
+    request: Request,
+    current_user_id: Optional[str] = Depends(get_optional_current_user_id_from_jwt)
+):
+    import asyncio
+    
+    try:
+        body = await request.json()
+        toolkit_slugs = body.get("toolkit_slugs", [])
+        
+        if not toolkit_slugs or not isinstance(toolkit_slugs, list):
+            raise HTTPException(status_code=400, detail="toolkit_slugs must be a non-empty list")
+        
+        if len(toolkit_slugs) > 50:
+            toolkit_slugs = toolkit_slugs[:50]
+        
+        toolkit_service = ToolkitService()
+        
+        async def fetch_icon(slug: str):
+            icon_url = await toolkit_service.get_toolkit_icon(slug)
+            return (slug, icon_url)
+        
+        results = await asyncio.gather(*[fetch_icon(slug) for slug in toolkit_slugs])
+        
+        icons = {slug: icon_url for slug, icon_url in results if icon_url}
+        
+        return {
+            "success": True,
+            "icons": icons
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting toolkit icons batch: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -671,6 +712,7 @@ class CreateComposioTriggerRequest(BaseModel):
     connected_account_id: Optional[str] = None
     webhook_url: Optional[str] = None
     toolkit_slug: Optional[str] = None
+    model: Optional[str] = None
 
 
 @router.post("/triggers/create")
@@ -679,13 +721,63 @@ async def create_composio_trigger(req: CreateComposioTriggerRequest, current_use
         client_db = await db.client
         agent_check = await client_db.table('agents').select('agent_id').eq('agent_id', req.agent_id).eq('account_id', current_user_id).execute()
         if not agent_check.data:
-            raise HTTPException(status_code=404, detail="Agent not found or access denied")
+            raise HTTPException(status_code=404, detail="Worker not found or access denied")
+
+        if config.ENV_MODE != EnvMode.LOCAL:
+            from core.utils.limits_checker import check_trigger_limit
+            limit_check = await check_trigger_limit(
+                account_id=current_user_id,
+                agent_id=req.agent_id,
+                trigger_type='app',
+                client=client_db,
+            )
+            
+            if not limit_check['can_create']:
+                error_detail = {
+                    "message": f"Maximum of {limit_check['limit']} app triggers allowed for your current plan. You have {limit_check['current_count']} app triggers.",
+                    "current_count": limit_check['current_count'],
+                    "limit": limit_check['limit'],
+                    "tier_name": limit_check['tier_name'],
+                    "trigger_type": "app",
+                    "error_code": "TRIGGER_LIMIT_EXCEEDED"
+                }
+                logger.warning(f"Trigger limit exceeded for account {current_user_id}: {limit_check['current_count']}/{limit_check['limit']} app triggers")
+                raise HTTPException(status_code=402, detail=error_detail)
 
         profile_service = ComposioProfileService(db)
-        profile_config = await profile_service.get_profile_config(req.profile_id)
+        profile_config = await profile_service.get_profile_config(req.profile_id, account_id=current_user_id)
         composio_user_id = profile_config.get("user_id")
         if not composio_user_id:
             raise HTTPException(status_code=400, detail="Composio profile is missing user_id")
+
+        derived_connected_account_id = profile_config.get("connected_account_id")
+        resolved_connected_account_id: Optional[str] = None
+        provided_connected_account_id = (req.connected_account_id or "").strip() or None
+
+        if provided_connected_account_id:
+            if provided_connected_account_id.startswith("ca_"):
+                resolved_connected_account_id = provided_connected_account_id
+            else:
+                try:
+                    UUID(provided_connected_account_id)
+                    logger.warning(
+                        "Ignoring UUID passed as connected_account_id for profile %s; using profile-derived connected account",
+                        req.profile_id,
+                    )
+                except (ValueError, AttributeError, TypeError):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Invalid connected_account_id format. Expected value like 'ca_...'.",
+                    )
+
+        if not resolved_connected_account_id:
+            resolved_connected_account_id = derived_connected_account_id
+
+        if not resolved_connected_account_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Connected account is missing for this profile. Reconnect the integration and try again.",
+            )
         
         toolkit_slug = req.toolkit_slug
         if not toolkit_slug:
@@ -711,8 +803,8 @@ async def create_composio_trigger(req: CreateComposioTriggerRequest, current_use
         coerced_config = dict(req.trigger_config or {})
         try:
             type_url = f"{COMPOSIO_API_BASE}/api/v3/triggers_types/{req.slug}"
-            async with httpx.AsyncClient(timeout=10) as http_client:
-                tr = await http_client.get(type_url, headers=headers)
+            async with get_http_client() as http_client:
+                tr = await http_client.get(type_url, headers=headers, timeout=10.0)
                 if tr.status_code == 200:
                     tdata = tr.json()
                     schema = tdata.get("config") or {}
@@ -749,12 +841,11 @@ async def create_composio_trigger(req: CreateComposioTriggerRequest, current_use
         body = {
             "user_id": composio_user_id,
             "trigger_config": coerced_config,
+            "connected_account_id": resolved_connected_account_id,
         }
-        if req.connected_account_id:
-            body["connected_account_id"] = req.connected_account_id
 
-        async with httpx.AsyncClient(timeout=20) as http_client:
-            resp = await http_client.post(url, headers=headers, json=body)
+        async with get_http_client() as http_client:
+            resp = await http_client.post(url, headers=headers, json=body, timeout=20.0)
             try:
                 resp.raise_for_status()
             except httpx.HTTPStatusError:
@@ -818,14 +909,13 @@ async def create_composio_trigger(req: CreateComposioTriggerRequest, current_use
         if not composio_trigger_id:
             raise HTTPException(status_code=500, detail="Failed to get Composio trigger id from response")
 
-        # Build Suna trigger config
         suna_config: Dict[str, Any] = {
             "provider_id": "composio",
             "composio_trigger_id": composio_trigger_id,
             "trigger_slug": req.slug,
-            "qualified_name": qualified_name,  # Store the qualified_name for template export
+            "qualified_name": qualified_name,
             "profile_id": req.profile_id,
-            # Include the actual trigger configuration (interval, etc.)
+            "model": req.model or "kortix/basic",
             **coerced_config,
         }
         if req.agent_prompt:
@@ -856,8 +946,9 @@ async def create_composio_trigger(req: CreateComposioTriggerRequest, current_use
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to create Composio trigger: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        error_msg = str(e) if e else "Unknown error"
+        logger.error(f"Failed to create Composio trigger: {error_msg}")
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @router.post("/webhook")

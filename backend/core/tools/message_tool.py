@@ -3,18 +3,83 @@ from core.agentpress.tool import Tool, ToolResult, openapi_schema, tool_metadata
 from core.utils.logger import logger
 
 @tool_metadata(
-    display_name="Chat & Messages",
-    description="Talk with users, ask questions, and share updates about your work",
+    display_name="AskUser",
+    description="Ask questions and communicate with users during execution",
     icon="MessageSquare",
     color="bg-purple-100 dark:bg-purple-800/50",
     is_core=True,
     weight=310,
-    visible=True
+    visible=True,
+    usage_guide="""
+## AskUser - User communication and question interface
+
+Use this tool when you need to ask the user questions during execution. This allows you to:
+1. Gather user preferences or requirements
+2. Clarify ambiguous instructions
+3. Get decisions on implementation choices as you work
+4. Offer choices to the user about what direction to take
+
+### Available Tools
+- **ask**: Ask questions, share information, request user input
+- **complete**: Signal that ALL work is finished
+- **wait**: Pause execution for a specified duration
+
+### When to Use `ask`
+- Answering questions or providing explanations
+- Sharing research results or information
+- Asking for clarification when genuinely needed
+- Presenting intermediate results during complex work
+- Any response that expects or allows further user input
+
+### When to Use `complete`
+ONLY when ALL of these are true:
+1. ALL tasks are 100% finished (no pending work)
+2. All deliverables have been created and attached
+3. No further user input is needed
+
+### Usage Notes
+- Users will always be able to select "Other" to provide custom text input
+- Use follow_up_answers to provide 2-4 actionable options users can click
+- If you recommend a specific option, make that the first option in the list
+
+### Critical Rules
+
+**Duplicate Content Prevention:**
+- NEVER output raw text AND use ask/complete with the same content
+- Put ALL content INSIDE the tool's `text` parameter ONLY
+- Raw text before/after tool calls causes duplication for users
+
+**Correct Usage:**
+```
+[calls ask with "Here's what I found..."]
+```
+
+**Incorrect Usage:**
+```
+Here's what I found...
+[calls ask with "Here's what I found..."]
+```
+
+**Attachment Protocol:**
+- ALL results, deliverables, outputs MUST be attached via `attachments` parameter
+- NEVER describe results without attaching the actual files
+- HTML files, PDFs, images, charts, spreadsheets → ALWAYS attach
+
+**Follow-up Answers:**
+- Every `ask` call SHOULD include `follow_up_answers` with 2-4 actionable options
+- For clarifications: specific clickable options
+- For information: suggest what user can do NEXT with the information
+
+### Communication Style
+- Focus on OUTCOMES, not implementation details
+- Use natural, conversational language
+- Hide technical complexity (no tool names, libraries, APIs)
+- Be direct - avoid filler phrases ("Certainly!", "Of course!")
+- Keep responses concise and actionable
+- Only use emojis if the user explicitly requests it
+"""
 )
 class MessageTool(Tool):
-    """Tool for user communication and interaction.
-    """
-
     def __init__(self):
         super().__init__()
 
@@ -22,38 +87,45 @@ class MessageTool(Tool):
         "type": "function",
         "function": {
             "name": "ask",
-            "description": "Ask user a question and wait for response. Use for: 1) Requesting clarification on ambiguous requirements, 2) Seeking confirmation before proceeding with high-impact changes, 3) Gathering additional information needed to complete a task, 4) Offering options and requesting user preference, 5) Validating assumptions when critical to task success, 6) When encountering unclear or ambiguous results during task execution, 7) When tool results don't match expectations, 8) For natural conversation and follow-up questions, 9) When research reveals multiple entities with the same name, 10) When user requirements are unclear or could be interpreted differently. IMPORTANT: Use this tool when user input is essential to proceed. Always provide clear context and options when applicable. Use natural, conversational language that feels like talking with a helpful friend. Include relevant attachments when the question relates to specific files or resources. CRITICAL: When you discover ambiguity (like multiple people with the same name), immediately stop and ask for clarification rather than making assumptions.",
+            "description": """Use this tool when you need to ask the user questions during execution. This allows you to:
+1. Gather user preferences or requirements
+2. Clarify ambiguous instructions
+3. Get decisions on implementation choices as you work
+4. Offer choices to the user about what direction to take
+
+Usage notes:
+- Users will always be able to select "Other" to provide custom text input
+- Use follow_up_answers to allow multiple answer options to be selected for a question
+- If you recommend a specific option, make that the first option in the list and add "(Recommended)" at the end
+
+CRITICAL: Put ALL content in the text parameter - never duplicate as raw text outside the tool call.""",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "text": {
                         "type": "string",
-                        "description": "Question text to present to user - should be specific and clearly indicate what information you need. Use natural, conversational language. Include: 1) Clear question or request, 2) Context about why the input is needed, 3) Available options if applicable, 4) Impact of different choices, 5) Any relevant constraints or considerations."
+                        "description": "**REQUIRED** - Your message to the user. Be clear, specific, and conversational. Focus on outcomes, not technical details."
                     },
                     "attachments": {
                         "anyOf": [
                             {"type": "string"},
                             {"items": {"type": "string"}, "type": "array"}
                         ],
-                        "description": "(Optional) List of files or URLs to attach to the question. Include when: 1) Question relates to specific files or configurations, 2) User needs to review content before answering, 3) Options or choices are documented in files, 4) Supporting evidence or context is needed. Always use relative paths to /workspace directory."
+                        "description": "**OPTIONAL** - Files or URLs to attach. Use for any deliverables, outputs, or work products. Use relative paths to /workspace."
+                    },
+                    "follow_up_answers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "**OPTIONAL** - 2-4 actionable suggestions the user can click. For questions: specific options. For information: suggest what they can do next."
                     }
                 },
-                "required": ["text"]
+                "required": ["text"],
+                "additionalProperties": False
             }
         }
     })
-    async def ask(self, text: str, attachments: Optional[Union[str, List[str]]] = None) -> ToolResult:
-        """Ask the user a question and wait for a response.
-
-        Args:
-            text: The question to present to the user
-            attachments: Optional file paths or URLs to attach to the question
-
-        Returns:
-            ToolResult indicating the question was successfully sent
-        """
+    async def ask(self, text: str, attachments: Optional[Union[str, List[str]]] = None, follow_up_answers: Optional[List[str]] = None) -> ToolResult:
         try:            
-            # Convert single attachment to list for consistent handling
             if attachments and isinstance(attachments, str):
                 attachments = [attachments]
           
@@ -61,117 +133,38 @@ class MessageTool(Tool):
         except Exception as e:
             return self.fail_response(f"Error asking user: {str(e)}")
 
-
-#     @openapi_schema({
-#         "type": "function",
-#         "function": {
-#             "name": "inform",
-#             "description": "Inform the user about progress, completion of a major step, or important context. Use this tool: 1) To provide updates between major sections of work, 2) After accomplishing significant milestones, 3) When transitioning to a new phase of work, 4) To confirm actions were completed successfully, 5) To provide context about upcoming steps. IMPORTANT: Use FREQUENTLY throughout execution to provide UI context to the user. The user CANNOT respond to this tool - they can only respond to the 'ask' tool. Use this tool to keep the user informed without requiring their input.",
-#             "parameters": {
-#                 "type": "object",
-#                 "properties": {
-#                     "text": {
-#                         "type": "string",
-#                         "description": "Information to present to the user. Include: 1) Clear statement of what has been accomplished or what is happening, 2) Relevant context or impact, 3) Brief indication of next steps if applicable."
-#                     },
-#                     "attachments": {
-#                         "anyOf": [
-#                             {"type": "string"},
-#                             {"items": {"type": "string"}, "type": "array"}
-#                         ],
-#                         "description": "(Optional) List of files or URLs to attach to the information. Include when: 1) Information relates to specific files or resources, 2) Showing intermediate results or outputs, 3) Providing supporting documentation. Always use relative paths to /workspace directory."
-#                     }
-#                 },
-#                 "required": ["text"]
-#             }
-#         }
-#     })
-#     @xml_schema(
-#         tag_name="inform",
-#         mappings=[
-#             {"param_name": "text", "node_type": "content", "path": "."},
-#             {"param_name": "attachments", "node_type": "attribute", "path": ".", "required": False}
-#         ],
-#         example='''
-
-# Inform the user about progress, completion of a major step, or important context. Use this tool: 1) To provide updates between major sections of work, 2) After accomplishing significant milestones, 3) When transitioning to a new phase of work, 4) To confirm actions were completed successfully, 5) To provide context about upcoming steps. IMPORTANT: Use FREQUENTLY throughout execution to provide UI context to the user. The user CANNOT respond to this tool - they can only respond to the 'ask' tool. Use this tool to keep the user informed without requiring their input."
-
-#         <!-- Use inform FREQUENTLY to provide UI context and progress updates - THE USER CANNOT RESPOND to this tool -->
-#         <!-- The user can ONLY respond to the ask tool, not to inform -->
-#         <!-- Examples of when to use inform: -->
-#         <!-- 1. Completing major milestones -->
-#         <!-- 2. Transitioning between work phases -->
-#         <!-- 3. Confirming important actions -->
-#         <!-- 4. Providing context about upcoming steps -->
-#         <!-- 5. Sharing significant intermediate results -->
-#         <!-- 6. Providing regular UI updates throughout execution -->
-
-#         <inform attachments="analysis_results.csv,summary_chart.png">
-#             I've completed the data analysis of the sales figures. Key findings include:
-#             - Q4 sales were 28% higher than Q3
-#             - Product line A showed the strongest performance
-#             - Three regions missed their targets
-
-#             I'll now proceed with creating the executive summary report based on these findings.
-#         </inform>
-#         '''
-#     )
-#     async def inform(self, text: str, attachments: Optional[Union[str, List[str]]] = None) -> ToolResult:
-#         """Inform the user about progress or important updates without requiring a response.
-
-#         Args:
-#             text: The information to present to the user
-#             attachments: Optional file paths or URLs to attach
-
-#         Returns:
-#             ToolResult indicating the information was successfully sent
-#         """
-#         try:
-#             # Convert single attachment to list for consistent handling
-#             if attachments and isinstance(attachments, str):
-#                 attachments = [attachments]
-
-#             return self.success_response({"status": "Information sent"})
-#         except Exception as e:
-#             return self.fail_response(f"Error informing user: {str(e)}")
-
-
     @openapi_schema({
         "type": "function",
         "function": {
             "name": "complete",
-            "description": "A special tool to indicate you have completed all tasks and are about to enter complete state. Use ONLY when: 1) All tasks in todo.md are marked complete [x], 2) The user's original request has been fully addressed, 3) There are no pending actions or follow-ups required, 4) You've delivered all final outputs and results to the user. IMPORTANT: This is the ONLY way to properly terminate execution. Never use this tool unless ALL tasks are complete and verified. Always ensure you've provided all necessary outputs and references before using this tool. Include relevant attachments when the completion relates to specific files or resources.",
+            "description": "Signal that ALL work is complete. Use ONLY when: 1) All tasks are done, 2) All deliverables created, 3) No further input needed. MANDATORY: Attach ALL outputs and include follow_up_prompts for next steps.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "text": {
                         "type": "string",
-                        "description": "Completion message or summary to present to user - should provide clear indication of what was accomplished. Include: 1) Summary of completed tasks, 2) Key deliverables or outputs, 3) Any important notes or next steps, 4) Impact or benefits achieved."
+                        "description": "**OPTIONAL** - Summary of what was accomplished."
                     },
                     "attachments": {
                         "anyOf": [
                             {"type": "string"},
                             {"items": {"type": "string"}, "type": "array"}
                         ],
-                        "description": "(Optional) List of files or URLs to attach to the completion message. Include when: 1) Completion relates to specific files or configurations, 2) User needs to review final outputs, 3) Deliverables are documented in files, 4) Supporting evidence or context is needed. Always use relative paths to /workspace directory."
+                        "description": "**REQUIRED when deliverables exist** - ALL files, outputs, and work products created. For presentations: attach first slide only (e.g., presentations/[name]/slide_01.html)."
+                    },
+                    "follow_up_prompts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "**MANDATORY** - 3-4 actionable suggestions for what the user can do next with the completed work."
                     }
                 },
-                "required": []
+                "required": [],
+                "additionalProperties": False
             }
         }
     })
-    async def complete(self, text: Optional[str] = None, attachments: Optional[Union[str, List[str]]] = None) -> ToolResult:
-        """Indicate that the agent has completed all tasks and is entering complete state.
-
-        Args:
-            text: Optional completion message or summary to present to the user
-            attachments: Optional file paths or URLs to attach to the completion message
-
-        Returns:
-            ToolResult indicating successful transition to complete state
-        """
+    async def complete(self, text: Optional[str] = None, attachments: Optional[Union[str, List[str]]] = None, follow_up_prompts: Optional[List[str]] = None) -> ToolResult:
         try:
-            # Convert single attachment to list for consistent handling
             if attachments and isinstance(attachments, str):
                 attachments = [attachments]
                 
@@ -183,45 +176,33 @@ class MessageTool(Tool):
         "type": "function",
         "function": {
             "name": "wait",
-            "description": "Pause execution for a specified number of seconds. Use this tool to add deliberate pauses in long-running processes to prevent rushing and maintain a steady, thoughtful pace. This helps prevent errors and ensures quality execution.",
+            "description": "Pause execution for a specified duration. Use for deliberate pacing in long-running processes.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "seconds": {
                         "type": "integer",
-                        "description": "Number of seconds to wait (1-300 seconds). Use 1-3 seconds for brief pauses, 5-10 seconds for processing waits, 60+ seconds for longer operations.",
+                        "description": "**REQUIRED** - Seconds to wait (1-300).",
                         "minimum": 1,
                         "maximum": 300
                     }
                 },
-                "required": ["seconds"]
+                "required": ["seconds"],
+                "additionalProperties": False
             }
         }
     })
     async def wait(self, seconds: int) -> ToolResult:
-        """Pause execution for a specified number of seconds.
-
-        Args:
-            seconds: Number of seconds to wait (1-300)
-
-        Returns:
-            ToolResult indicating the wait was completed
-        """
         try:
-            # Validate duration
             if seconds < 1 or seconds > 300:
                 return self.fail_response("Duration must be between 1 and 300 seconds")
             
-            # Import asyncio for the sleep
             import asyncio
             
-            # Log the wait
             logger.info(f"Agent waiting {seconds} seconds")
             
-            # Perform the wait
             await asyncio.sleep(seconds)
             
-            # Return success
             return self.success_response(f"Waited {seconds} seconds")
             
         except Exception as e:
@@ -234,18 +215,10 @@ if __name__ == "__main__":
     async def test_message_tool():
         message_tool = MessageTool()
 
-        # Test question
         ask_result = await message_tool.ask(
             text="Would you like to proceed with the next phase?",
             attachments="summary.pdf"
         )
         print("Question result:", ask_result)
-
-        # Test inform
-        inform_result = await message_tool.inform(
-            text="Completed analysis of data. Processing results now.",
-            attachments="analysis.pdf"
-        )
-        print("Inform result:", inform_result)
 
     asyncio.run(test_message_tool())

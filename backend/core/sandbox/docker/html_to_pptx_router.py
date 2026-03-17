@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
+from urllib.parse import quote
 from pydantic import BaseModel, Field
 
 try:
@@ -36,9 +37,10 @@ except ImportError as e:
 # Create router
 router = APIRouter(prefix="/presentation", tags=["pptx-conversion"])
 
-# Create output directory for generated PPTXs
-output_dir = Path("generated_pptx")
-output_dir.mkdir(exist_ok=True)
+# Create output directory for generated PPTXs in workspace downloads
+workspace_dir = "/workspace"
+output_dir = Path(workspace_dir) / "downloads"
+output_dir.mkdir(parents=True, exist_ok=True)
 
 
 class ConvertRequest(BaseModel):
@@ -1523,16 +1525,18 @@ async def convert_presentation_to_pptx(request: ConvertRequest):
         if request.download:
             pptx_content, total_slides, presentation_name = await converter.convert_to_pptx(store_locally=False)
             
+            encoded_filename = quote(f"{presentation_name}.pptx", safe="")
             return Response(
                 content=pptx_content,
                 media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                headers={"Content-Disposition": f"attachment; filename=\"{presentation_name}.pptx\""}
+                headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"}
             )
         
         # Otherwise, store locally and return JSON with download URL
         pptx_path, total_slides = await converter.convert_to_pptx(store_locally=True)
         
-        pptx_url = f"/downloads/{pptx_path.name}"
+        # Return workspace-relative path for file system access
+        pptx_url = f"/workspace/downloads/{pptx_path.name}"
         
         return ConvertResponse(
             success=True,
@@ -1543,11 +1547,23 @@ async def convert_presentation_to_pptx(request: ConvertRequest):
         )
         
     except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        error_msg = str(e)
+        print(f"❌ FileNotFoundError: {error_msg}")
+        raise HTTPException(status_code=404, detail=error_msg)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        error_msg = str(e)
+        print(f"❌ ValueError: {error_msg}")
+        raise HTTPException(status_code=400, detail=error_msg)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PPTX conversion failed: {str(e)}")
+        import traceback
+        error_msg = str(e)
+        error_traceback = traceback.format_exc()
+        print(f"❌ PPTX conversion error: {error_msg}")
+        print(f"❌ Traceback:\n{error_traceback}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"PPTX conversion failed: {error_msg}"
+        )
 
 
 @router.get("/health")

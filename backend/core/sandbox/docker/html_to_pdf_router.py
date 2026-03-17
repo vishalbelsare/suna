@@ -13,6 +13,7 @@ import tempfile
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
+from urllib.parse import quote
 from pydantic import BaseModel, Field
 
 try:
@@ -29,9 +30,10 @@ except ImportError:
 # Create router
 router = APIRouter(prefix="/presentation", tags=["pdf-conversion"])
 
-# Create output directory for generated PDFs
-output_dir = Path("generated_pdfs")
-output_dir.mkdir(exist_ok=True)
+# Create output directory for generated PDFs in workspace downloads
+workspace_dir = "/workspace"
+output_dir = Path(workspace_dir) / "downloads"
+output_dir.mkdir(parents=True, exist_ok=True)
 
 
 class ConvertRequest(BaseModel):
@@ -106,78 +108,107 @@ class PresentationToPDFAPI:
         except Exception as e:
             raise ValueError(f"Error loading metadata: {e}")
     
-    async def render_slide_to_pdf(self, browser, slide_info: Dict, temp_dir: Path) -> Path:
-        """Render a single HTML slide to PDF using Playwright."""
+    async def render_slide_to_pdf(self, browser, slide_info: Dict, temp_dir: Path, max_retries: int = 3) -> Path:
+        """Render a single HTML slide to PDF using Playwright with retry logic."""
         html_path = slide_info['path']
         slide_num = slide_info['number']
         
-        print(f"Rendering slide {slide_num}: {slide_info['title']}")
+        last_error = None
         
-        # Create new page with exact presentation dimensions
-        page = await browser.new_page()
-        
-        try:
-            # Set exact viewport to 1920x1080
-            await page.set_viewport_size({"width": 1920, "height": 1080})
-            await page.emulate_media(media='screen')
-            
-            # Override device pixel ratio for exact dimensions
-            await page.evaluate("""
-                () => {
-                    Object.defineProperty(window, 'devicePixelRatio', {
-                        get: () => 1
-                    });
-                }
-            """)
-            
-            # Navigate to the HTML file
-            file_url = f"file://{html_path.absolute()}"
-            await page.goto(file_url, wait_until="networkidle", timeout=30000)
-            
-            # Wait for fonts and dynamic content to load
-            await page.wait_for_timeout(3000)
-            
-            # Ensure exact slide dimensions
-            await page.evaluate("""
-                () => {
-                    const slideContainer = document.querySelector('.slide-container');
-                    if (slideContainer) {
-                        slideContainer.style.width = '1920px';
-                        slideContainer.style.height = '1080px';
-                        slideContainer.style.transform = 'none';
-                        slideContainer.style.maxWidth = 'none';
-                        slideContainer.style.maxHeight = 'none';
+        for attempt in range(max_retries):
+            page = None
+            try:
+                if attempt > 0:
+                    print(f"  ⟳ Retry {attempt}/{max_retries - 1} for slide {slide_num}...")
+                    # Wait before retry to let browser stabilize
+                    await asyncio.sleep(2.0 * attempt)
+                else:
+                    print(f"Rendering slide {slide_num}: {slide_info['title']}")
+                
+                # Create new page with exact presentation dimensions
+                page = await browser.new_page()
+                
+                # Set exact viewport to 1920x1080
+                await page.set_viewport_size({"width": 1920, "height": 1080})
+                await page.emulate_media(media='screen')
+                
+                # Override device pixel ratio for exact dimensions
+                await page.evaluate("""
+                    () => {
+                        Object.defineProperty(window, 'devicePixelRatio', {
+                            get: () => 1
+                        });
                     }
-                    
-                    document.body.style.margin = '0';
-                    document.body.style.padding = '0';
-                    document.body.style.width = '1920px';
-                    document.body.style.height = '1080px';
-                    document.body.style.overflow = 'hidden';
-                }
-            """)
-            
-            await page.wait_for_timeout(1000)
-            
-            # Generate PDF for this slide
-            temp_pdf_path = temp_dir / f"slide_{slide_num:02d}.pdf"
-            
-            await page.pdf(
-                path=str(temp_pdf_path),
-                width="1920px",
-                height="1080px",
-                margin={"top": "0", "right": "0", "bottom": "0", "left": "0"},
-                print_background=True,
-                prefer_css_page_size=False
-            )
-            
-            print(f"  ✓ Slide {slide_num} rendered")
-            return temp_pdf_path
-            
-        except Exception as e:
-            raise RuntimeError(f"Error rendering slide {slide_num}: {e}")
-        finally:
-            await page.close()
+                """)
+                
+                # Navigate to the HTML file
+                file_url = f"file://{html_path.absolute()}"
+                await page.goto(file_url, wait_until="networkidle", timeout=30000)
+                
+                # Wait for fonts and dynamic content to load
+                await page.wait_for_timeout(3000)
+                
+                # Ensure exact slide dimensions
+                await page.evaluate("""
+                    () => {
+                        const slideContainer = document.querySelector('.slide-container');
+                        if (slideContainer) {
+                            slideContainer.style.width = '1920px';
+                            slideContainer.style.height = '1080px';
+                            slideContainer.style.transform = 'none';
+                            slideContainer.style.maxWidth = 'none';
+                            slideContainer.style.maxHeight = 'none';
+                        }
+                        
+                        document.body.style.margin = '0';
+                        document.body.style.padding = '0';
+                        document.body.style.width = '1920px';
+                        document.body.style.height = '1080px';
+                        document.body.style.overflow = 'hidden';
+                    }
+                """)
+                
+                await page.wait_for_timeout(1000)
+                
+                # Generate PDF for this slide
+                temp_pdf_path = temp_dir / f"slide_{slide_num:02d}.pdf"
+                
+                await page.pdf(
+                    path=str(temp_pdf_path),
+                    width="1920px",
+                    height="1080px",
+                    margin={"top": "0", "right": "0", "bottom": "0", "left": "0"},
+                    print_background=True,
+                    prefer_css_page_size=False
+                )
+                
+                print(f"  ✓ Slide {slide_num} rendered")
+                return temp_pdf_path
+                
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+                # Check if error is retryable (browser/PDF crashes)
+                is_retryable = any(keyword in error_str for keyword in [
+                    "target closed", "target crashed", "crashed", "protocol error",
+                    "printtopdf", "printing failed", "session closed", "connection closed",
+                    "browser", "timeout", "navigation failed"
+                ])
+                
+                if is_retryable and attempt < max_retries - 1:
+                    print(f"  ⚠ Slide {slide_num} failed (attempt {attempt + 1}): {e}")
+                    continue
+                else:
+                    # Non-retryable error or exhausted retries
+                    break
+            finally:
+                if page:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass  # Page might already be closed due to crash
+        
+        raise RuntimeError(f"Error rendering slide {slide_num} after {max_retries} attempts: {last_error}")
     
     def combine_pdfs(self, pdf_paths: List[Path], output_path: Path) -> None:
         """Combine multiple PDF files into a single PDF."""
@@ -203,8 +234,8 @@ class PresentationToPDFAPI:
             raise RuntimeError(f"Error combining PDFs: {e}")
     
     async def convert_to_pdf(self, store_locally: bool = True) -> tuple:
-        """Main conversion method with concurrent processing."""
-        print("🚀 Starting concurrent HTML to PDF conversion...")
+        """Main conversion method with controlled concurrent processing."""
+        print("🚀 Starting HTML to PDF conversion...")
         
         # Load metadata
         self.load_metadata()
@@ -224,20 +255,29 @@ class PresentationToPDFAPI:
                         '--disable-dev-shm-usage',
                         '--disable-gpu',
                         '--force-device-scale-factor=1',
-                        '--disable-background-timer-throttling'
+                        '--disable-background-timer-throttling',
+                        # Note: --single-process removed - causes browser crashes with concurrent PDF generation
                     ]
                 )
                 
                 try:
-                    # Process all slides concurrently using asyncio.gather
-                    print(f"📄 Processing {len(self.slides_info)} slides concurrently...")
+                    # Limit concurrent renders to prevent memory pressure
+                    # 5 concurrent slides balances speed and stability
+                    max_concurrent = 5
+                    semaphore = asyncio.Semaphore(max_concurrent)
+                    
+                    async def render_with_limit(slide_info):
+                        async with semaphore:
+                            return await self.render_slide_to_pdf(browser, slide_info, temp_path)
+                    
+                    print(f"📄 Processing {len(self.slides_info)} slides (max {max_concurrent} concurrent)...")
                     
                     tasks = [
-                        self.render_slide_to_pdf(browser, slide_info, temp_path)
+                        render_with_limit(slide_info)
                         for slide_info in self.slides_info
                     ]
                     
-                    # Wait for all slides to be processed concurrently
+                    # Wait for all slides to be processed
                     pdf_paths = await asyncio.gather(*tasks)
                     
                 finally:
@@ -277,6 +317,16 @@ async def convert_presentation_to_pdf(request: ConvertRequest):
     """
     try:
         print(f"📥 Received conversion request for: {request.presentation_path}")
+        print(f"📥 Download flag: {request.download}")
+        
+        # Validate presentation path exists before creating converter
+        presentation_path_obj = Path(request.presentation_path)
+        if not presentation_path_obj.exists():
+            error_msg = f"Presentation path does not exist: {request.presentation_path}"
+            print(f"❌ {error_msg}")
+            raise FileNotFoundError(error_msg)
+        
+        print(f"✅ Presentation path exists: {presentation_path_obj}")
         
         # Create converter
         converter = PresentationToPDFAPI(request.presentation_path)
@@ -287,10 +337,11 @@ async def convert_presentation_to_pdf(request: ConvertRequest):
             
             print(f"✨ Direct download conversion completed for: {presentation_name}")
             
+            encoded_filename = quote(f"{presentation_name}.pdf", safe="")
             return Response(
                 content=pdf_content,
                 media_type="application/pdf",
-                headers={"Content-Disposition": f"attachment; filename=\"{presentation_name}.pdf\""}
+                headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"}
             )
         
         # Otherwise, store locally and return JSON with download URL
@@ -298,7 +349,8 @@ async def convert_presentation_to_pdf(request: ConvertRequest):
         
         print(f"✨ Conversion completed: {pdf_path}")
         
-        pdf_url = f"/downloads/{pdf_path.name}"
+        # Return workspace-relative path for file system access
+        pdf_url = f"/workspace/downloads/{pdf_path.name}"
         
         return ConvertResponse(
             success=True,
@@ -309,15 +361,165 @@ async def convert_presentation_to_pdf(request: ConvertRequest):
         )
         
     except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        error_msg = str(e)
+        print(f"❌ FileNotFoundError: {error_msg}")
+        raise HTTPException(status_code=404, detail=error_msg)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        error_msg = str(e)
+        print(f"❌ ValueError: {error_msg}")
+        raise HTTPException(status_code=400, detail=error_msg)
     except Exception as e:
-        print(f"❌ Conversion error: {e}")
-        raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
+        import traceback
+        error_msg = str(e)
+        error_traceback = traceback.format_exc()
+        print(f"❌ Conversion error: {error_msg}")
+        print(f"❌ Traceback:\n{error_traceback}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Conversion failed: {error_msg}"
+        )
 
 
 @router.get("/health")
 async def pdf_health_check():
     """PDF service health check endpoint."""
     return {"status": "healthy", "service": "HTML to PDF Converter"}
+
+
+# ============================================================================
+# Single HTML File to PDF Conversion
+# ============================================================================
+
+class HtmlToPdfRequest(BaseModel):
+    """Request model for single HTML file/content to PDF conversion"""
+    content: str = Field(None, description="HTML content to convert (used if file_path not provided)")
+    file_path: str = Field(None, description="Path to HTML file in workspace (takes precedence over content)")
+    file_name: str = Field("document", description="Output filename (without extension)")
+
+
+@router.post("/html-to-pdf")
+async def convert_html_to_pdf(request: HtmlToPdfRequest):
+    """
+    Convert a single HTML file or HTML content to PDF using Playwright/Chromium.
+
+    Provides high-quality PDF rendering using a real browser engine.
+    Either provide file_path (path to HTML file in workspace) or content (raw HTML string).
+    """
+    try:
+        html_content = None
+        file_name = request.file_name or "document"
+
+        # Get HTML content from file or direct content
+        if request.file_path:
+            # Read from file
+            file_path = Path(request.file_path)
+            if not file_path.is_absolute():
+                file_path = Path("/workspace") / file_path
+
+            if not file_path.exists():
+                raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
+
+            with open(file_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+
+            # Use filename from path if not specified
+            if request.file_name == "document":
+                file_name = file_path.stem
+
+        elif request.content:
+            html_content = request.content
+        else:
+            raise HTTPException(status_code=400, detail="Either 'content' or 'file_path' must be provided")
+
+        print(f"[HTML to PDF] Converting: {file_name}, Content length: {len(html_content)}")
+
+        # Ensure content is a complete HTML document
+        if '<!DOCTYPE' not in html_content.upper() and '<html' not in html_content.lower():
+            html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{file_name}</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            font-size: 12pt;
+            line-height: 1.6;
+            color: #1a1a1a;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }}
+        h1, h2, h3, h4, h5, h6 {{ font-weight: 600; line-height: 1.3; margin: 1.5em 0 0.5em 0; }}
+        h1 {{ font-size: 2em; border-bottom: 1px solid #e0e0e0; padding-bottom: 0.3em; }}
+        h2 {{ font-size: 1.5em; }}
+        h3 {{ font-size: 1.25em; }}
+        p {{ margin: 1em 0; }}
+        code {{ font-family: monospace; background: #f4f4f5; padding: 0.2em 0.4em; border-radius: 3px; }}
+        pre {{ background: #f4f4f5; padding: 1em; border-radius: 6px; overflow-x: auto; }}
+        pre code {{ background: none; padding: 0; }}
+        blockquote {{ margin: 1em 0; padding: 0.5em 1em; border-left: 4px solid #e0e0e0; color: #555; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 1em 0; }}
+        th, td {{ border: 1px solid #e0e0e0; padding: 0.5em 1em; text-align: left; }}
+        th {{ background: #f8f9fa; font-weight: 600; }}
+        img {{ max-width: 100%; height: auto; }}
+        a {{ color: #0066cc; }}
+    </style>
+</head>
+<body>
+{html_content}
+</body>
+</html>"""
+
+        # Convert to PDF using Playwright
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                ]
+            )
+
+            try:
+                page = await browser.new_page()
+
+                # Set content and wait for load
+                await page.set_content(html_content, wait_until="networkidle")
+                await page.wait_for_timeout(1000)  # Allow fonts/images to load
+
+                # Generate PDF with A4 size and margins
+                pdf_bytes = await page.pdf(
+                    format="A4",
+                    margin={
+                        "top": "20mm",
+                        "right": "20mm",
+                        "bottom": "20mm",
+                        "left": "20mm"
+                    },
+                    print_background=True
+                )
+
+            finally:
+                await browser.close()
+
+        print(f"[HTML to PDF] Success: {file_name}.pdf ({len(pdf_bytes)} bytes)")
+
+        # Return PDF directly
+        encoded_filename = quote(f"{file_name}.pdf", safe="")
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"}
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_msg = str(e)
+        print(f"❌ HTML to PDF error: {error_msg}")
+        print(f"❌ Traceback:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"PDF conversion failed: {error_msg}")

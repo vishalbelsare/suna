@@ -1,6 +1,6 @@
 /**
  * Trigger Detail Page Component
- * 
+ *
  * Clean, modern detail view for viewing/managing a single trigger
  * Matches the ThreadPage design language with consistent spacing and typography
  */
@@ -9,34 +9,33 @@ import React, { useState } from 'react';
 import { View, Pressable, ScrollView, Alert, ActivityIndicator } from 'react-native';
 import { Text } from '@/components/ui/text';
 import { Icon } from '@/components/ui/icon';
+import { Avatar } from '@/components/ui/Avatar';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColorScheme } from 'nativewind';
 import { useRouter } from 'expo-router';
-import Animated, {
-  useAnimatedStyle,
-  useSharedValue,
-  withSpring,
-} from 'react-native-reanimated';
+import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
-import { 
-  ChevronLeft, 
-  Edit, 
-  Trash2, 
-  Copy, 
-  Clock, 
+import {
+  ChevronLeft,
+  Edit,
+  Trash2,
+  Copy,
+  Clock,
   Zap,
   Calendar,
   MessageSquare,
   Globe,
   CheckCircle2,
-  XCircle
+  XCircle,
 } from 'lucide-react-native';
 import { useTrigger, useDeleteTrigger, useToggleTrigger } from '@/lib/triggers';
-import { 
-  getTriggerIcon, 
-  getTriggerCategory, 
-  formatCronExpression, 
-  formatTriggerDate 
+import { TriggerCreationDrawer } from '@/components/triggers/TriggerCreationDrawer';
+import { log } from '@/lib/logger';
+import {
+  getTriggerIcon,
+  getTriggerCategory,
+  formatCronExpression,
+  formatTriggerDate,
 } from '@/lib/utils/trigger-utils';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
@@ -49,21 +48,21 @@ interface TriggerDetailPageProps {
  * Action Button Component
  * Consistent button style matching the app's design system
  */
-function ActionButton({ 
-  icon: IconComponent, 
-  label, 
-  onPress, 
+function ActionButton({
+  icon: IconComponent,
+  label,
+  onPress,
   variant = 'default',
-  disabled = false
-}: { 
-  icon: any; 
-  label: string; 
+  disabled = false,
+}: {
+  icon: any;
+  label: string;
   onPress: () => void;
   variant?: 'default' | 'destructive';
   disabled?: boolean;
 }) {
   const scale = useSharedValue(1);
-  
+
   const animatedStyle = useAnimatedStyle(() => ({
     transform: [{ scale: scale.value }],
   }));
@@ -83,20 +82,18 @@ function ActionButton({
       onPressOut={handlePressOut}
       disabled={disabled}
       style={animatedStyle}
-      className={`flex-row items-center justify-center gap-2 py-4 px-4 rounded-2xl ${
-        variant === 'destructive' 
-          ? 'bg-destructive' 
-          : 'bg-secondary border border-border'
-      } ${disabled ? 'opacity-50' : ''}`}
-    >
-      <Icon 
-        as={IconComponent} 
-        size={20} 
-        className={variant === 'destructive' ? 'text-white' : 'text-foreground'} 
+      className={`flex-row items-center justify-center gap-2 rounded-2xl px-4 py-4 ${
+        variant === 'destructive' ? 'bg-destructive' : 'border border-border bg-secondary'
+      } ${disabled ? 'opacity-50' : ''}`}>
+      <Icon
+        as={IconComponent}
+        size={20}
+        className={variant === 'destructive' ? 'text-white' : 'text-foreground'}
       />
-      <Text className={`text-base font-roobert-medium ${
-        variant === 'destructive' ? 'text-white' : 'text-foreground'
-      }`}>
+      <Text
+        className={`font-roobert-medium text-base ${
+          variant === 'destructive' ? 'text-white' : 'text-foreground'
+        }`}>
         {label}
       </Text>
     </AnimatedPressable>
@@ -107,31 +104,26 @@ function ActionButton({
  * Info Row Component
  * Consistent info display with icon, label, and value
  */
-function InfoRow({ 
-  icon: IconComponent, 
-  label, 
+function InfoRow({
+  icon: IconComponent,
+  label,
   value,
-  mono = false
-}: { 
-  icon: any; 
-  label: string; 
+  mono = false,
+}: {
+  icon: any;
+  label: string;
   value: string;
   mono?: boolean;
 }) {
   return (
-    <View className="flex-row items-start gap-3 mb-4">
-      <View className="w-10 h-10 rounded-xl bg-secondary items-center justify-center">
-        <Icon as={IconComponent} size={20} className="text-foreground/70" />
-      </View>
+    <View className="mb-4 flex-row items-start gap-3">
+      <Avatar variant="custom" icon={IconComponent} size={40} />
       <View className="flex-1">
-        <Text className="text-muted-foreground text-sm font-roobert mb-1">
-          {label}
-        </Text>
-        <Text 
-          className="text-foreground text-base font-roobert-medium"
+        <Text className="mb-1 font-roobert text-sm text-muted-foreground">{label}</Text>
+        <Text
+          className="font-roobert-medium text-base text-foreground"
           style={mono ? { fontFamily: 'monospace' } : undefined}
-          numberOfLines={mono ? undefined : 3}
-        >
+          numberOfLines={mono ? undefined : 3}>
           {value}
         </Text>
       </View>
@@ -146,9 +138,7 @@ function InfoRow({
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <View className="mb-8">
-      <Text className="text-foreground text-lg font-roobert-semibold mb-4">
-        {title}
-      </Text>
+      <Text className="mb-4 font-roobert-semibold text-lg text-foreground">{title}</Text>
       {children}
     </View>
   );
@@ -159,10 +149,11 @@ export function TriggerDetailPage({ triggerId }: TriggerDetailPageProps) {
   const { colorScheme } = useColorScheme();
   const insets = useSafeAreaInsets();
   const backScale = useSharedValue(1);
-  
+
   const { data: trigger, isLoading, error, refetch } = useTrigger(triggerId);
   const deleteTriggerMutation = useDeleteTrigger();
   const toggleTriggerMutation = useToggleTrigger();
+  const [showEditDrawer, setShowEditDrawer] = useState(false);
 
   const backAnimatedStyle = useAnimatedStyle(() => ({
     transform: [{ scale: backScale.value }],
@@ -182,9 +173,10 @@ export function TriggerDetailPage({ triggerId }: TriggerDetailPageProps) {
         isActive: !trigger.is_active,
       });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      log.log('🔄 Trigger toggled successfully:', trigger.trigger_id);
       refetch();
     } catch (error) {
-      console.error('Error toggling trigger:', error);
+      log.error('Error toggling trigger:', error);
       Alert.alert('Error', 'Failed to update trigger status. Please try again.');
     }
   };
@@ -213,7 +205,7 @@ export function TriggerDetailPage({ triggerId }: TriggerDetailPageProps) {
               Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
               router.back();
             } catch (error) {
-              console.error('Error deleting trigger:', error);
+              log.error('Error deleting trigger:', error);
               Alert.alert('Error', 'Failed to delete trigger. Please try again.');
             }
           },
@@ -224,7 +216,7 @@ export function TriggerDetailPage({ triggerId }: TriggerDetailPageProps) {
 
   const handleCopyWebhookUrl = async () => {
     if (!trigger?.webhook_url) return;
-    
+
     // TODO: Implement clipboard functionality with Expo Clipboard
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     Alert.alert('Copied!', 'Webhook URL copied to clipboard');
@@ -235,16 +227,16 @@ export function TriggerDetailPage({ triggerId }: TriggerDetailPageProps) {
     return (
       <View className="flex-1 bg-background">
         <View className="flex-1 items-center justify-center px-8">
-          <View className="w-20 h-20 rounded-full bg-secondary/30 items-center justify-center mb-6">
-            <ActivityIndicator 
-              size="large" 
-              color={colorScheme === 'dark' ? '#FFFFFF' : '#121215'} 
+          <View className="mb-6 h-20 w-20 items-center justify-center rounded-full bg-secondary/30">
+            <ActivityIndicator
+              size="large"
+              color={colorScheme === 'dark' ? '#FFFFFF' : '#121215'}
             />
           </View>
-          <Text className="text-foreground text-lg font-roobert-semibold text-center">
+          <Text className="text-center font-roobert-semibold text-lg text-foreground">
             Loading trigger...
           </Text>
-          <Text className="text-muted-foreground text-sm font-roobert mt-2 text-center">
+          <Text className="mt-2 text-center font-roobert text-sm text-muted-foreground">
             Fetching trigger details
           </Text>
         </View>
@@ -257,20 +249,16 @@ export function TriggerDetailPage({ triggerId }: TriggerDetailPageProps) {
     return (
       <View className="flex-1 bg-background">
         <View className="flex-1 items-center justify-center p-6">
-          <View className="w-20 h-20 rounded-full bg-destructive/20 items-center justify-center mb-4">
+          <View className="mb-4 h-20 w-20 items-center justify-center rounded-full bg-destructive/20">
             <Icon as={XCircle} size={40} className="text-destructive" />
           </View>
-          <Text className="text-foreground text-lg font-roobert-semibold text-center mb-2">
+          <Text className="mb-2 text-center font-roobert-semibold text-lg text-foreground">
             Trigger Not Found
           </Text>
-          <Text className="text-muted-foreground text-sm font-roobert text-center mb-6">
+          <Text className="mb-6 text-center font-roobert text-sm text-muted-foreground">
             This trigger may have been deleted or you don't have permission to view it.
           </Text>
-          <ActionButton
-            icon={ChevronLeft}
-            label="Go Back"
-            onPress={handleBack}
-          />
+          <ActionButton icon={ChevronLeft} label="Go Back" onPress={handleBack} />
         </View>
       </View>
     );
@@ -283,10 +271,9 @@ export function TriggerDetailPage({ triggerId }: TriggerDetailPageProps) {
   return (
     <View className="flex-1 bg-background">
       {/* Header - Fixed at top, matching ThreadHeader style */}
-      <View 
-        className="absolute top-0 left-0 right-0 bg-background z-50 border-b border-border/20" 
-        style={{ paddingTop: insets.top }}
-      >
+      <View
+        className="absolute left-0 right-0 top-0 z-50 border-b border-border/20 bg-background"
+        style={{ paddingTop: insets.top }}>
         <View className="flex-row items-center justify-between px-6 py-3">
           {/* Left - Back Button */}
           <AnimatedPressable
@@ -298,57 +285,49 @@ export function TriggerDetailPage({ triggerId }: TriggerDetailPageProps) {
             }}
             onPress={handleBack}
             style={backAnimatedStyle}
-            className="w-8 h-8 items-center justify-center -ml-2"
+            className="-ml-2 h-8 w-8 items-center justify-center"
             accessibilityRole="button"
-            accessibilityLabel="Go back"
-          >
+            accessibilityLabel="Go back">
             <Icon as={ChevronLeft} size={20} className="text-foreground/70" strokeWidth={2} />
           </AnimatedPressable>
 
           {/* Center - Title */}
-          <View className="flex-1 mx-4">
-            <Text 
-              className="text-sm font-roobert-semibold text-foreground text-center" 
-              numberOfLines={1}
-            >
+          <View className="mx-4 flex-1">
+            <Text
+              className="text-center font-roobert-semibold text-sm text-foreground"
+              numberOfLines={1}>
               Trigger Details
             </Text>
           </View>
 
           {/* Right - Placeholder for symmetry */}
-          <View className="w-8 h-8" />
+          <View className="h-8 w-8" />
         </View>
       </View>
 
       {/* Scrollable Content */}
-      <ScrollView 
+      <ScrollView
         className="flex-1"
         showsVerticalScrollIndicator={true}
-        contentContainerStyle={{ 
+        contentContainerStyle={{
           flexGrow: 1,
-          paddingTop: insets.top + 60, // Safe area + header height
-          paddingBottom: 100,
+          paddingTop: insets.top + 80, // Safe area + header height
           paddingHorizontal: 24,
         }}
         keyboardShouldPersistTaps="handled"
         scrollEventThrottle={16}
         bounces={true}
-        alwaysBounceVertical={false}
-      >
+        alwaysBounceVertical={false}>
         {/* Trigger Icon & Name */}
-        <View className="items-center mb-8">
-          <View className="w-20 h-20 rounded-full bg-secondary items-center justify-center mb-4">
-            <Icon 
-              as={IconComponent} 
-              size={36} 
-              className="text-foreground" 
-            />
+        <View className="mb-8 items-center">
+          <View className="mb-4 h-20 w-20 items-center justify-center rounded-full bg-secondary">
+            <Icon as={IconComponent} size={36} className="text-foreground" />
           </View>
-          <Text className="text-foreground text-2xl font-roobert-semibold text-center mb-2">
+          <Text className="mb-2 text-center font-roobert-semibold text-2xl text-foreground">
             {trigger.name}
           </Text>
           {trigger.description && (
-            <Text className="text-muted-foreground text-base font-roobert text-center">
+            <Text className="text-center font-roobert text-base text-muted-foreground">
               {trigger.description}
             </Text>
           )}
@@ -359,19 +338,23 @@ export function TriggerDetailPage({ triggerId }: TriggerDetailPageProps) {
           <Pressable
             onPress={handleToggleActive}
             disabled={toggleTriggerMutation.isPending}
-            className={`flex-row items-center justify-between p-4 rounded-2xl ${
-              trigger.is_active ? 'bg-green-500/10 border border-green-500/30' : 'bg-secondary border border-border'
-            } ${toggleTriggerMutation.isPending ? 'opacity-50' : ''}`}
-          >
+            className={`flex-row items-center justify-between rounded-2xl p-4 ${
+              trigger.is_active
+                ? 'border border-green-500/30 bg-green-500/10'
+                : 'border border-border bg-secondary'
+            } ${toggleTriggerMutation.isPending ? 'opacity-50' : ''}`}>
             <View className="flex-row items-center gap-3">
-              <View className={`w-3 h-3 rounded-full ${trigger.is_active ? 'bg-green-500' : 'bg-muted-foreground'}`} />
-              <Text className={`text-base font-roobert-medium ${
-                trigger.is_active ? 'text-green-600 dark:text-green-400' : 'text-muted-foreground'
-              }`}>
+              <View
+                className={`h-3 w-3 rounded-full ${trigger.is_active ? 'bg-green-500' : 'bg-muted-foreground'}`}
+              />
+              <Text
+                className={`font-roobert-medium text-base ${
+                  trigger.is_active ? 'text-green-600 dark:text-green-400' : 'text-muted-foreground'
+                }`}>
                 {trigger.is_active ? 'Active' : 'Inactive'}
               </Text>
             </View>
-            <Text className="text-sm font-roobert text-muted-foreground">
+            <Text className="font-roobert text-sm text-muted-foreground">
               Tap to {trigger.is_active ? 'disable' : 'enable'}
             </Text>
           </Pressable>
@@ -384,11 +367,7 @@ export function TriggerDetailPage({ triggerId }: TriggerDetailPageProps) {
             label="Type"
             value={category === 'scheduled' ? 'Scheduled Trigger' : 'Event Trigger'}
           />
-          <InfoRow
-            icon={Calendar}
-            label="Created"
-            value={formattedDate}
-          />
+          <InfoRow icon={Calendar} label="Created" value={formattedDate} />
         </Section>
 
         {/* Schedule Configuration */}
@@ -406,23 +385,15 @@ export function TriggerDetailPage({ triggerId }: TriggerDetailPageProps) {
               mono
             />
             {trigger.config.timezone && (
-              <InfoRow
-                icon={Globe}
-                label="Timezone"
-                value={trigger.config.timezone}
-              />
+              <InfoRow icon={Globe} label="Timezone" value={trigger.config.timezone} />
             )}
           </Section>
         )}
 
         {/* Agent Prompt */}
         {trigger.config?.agent_prompt && (
-          <Section title="Agent Prompt">
-            <InfoRow
-              icon={MessageSquare}
-              label="Instruction"
-              value={trigger.config.agent_prompt}
-            />
+          <Section title="Worker Prompt">
+            <InfoRow icon={MessageSquare} label="Instruction" value={trigger.config.agent_prompt} />
           </Section>
         )}
 
@@ -431,10 +402,9 @@ export function TriggerDetailPage({ triggerId }: TriggerDetailPageProps) {
           <Section title="Webhook">
             <Pressable
               onPress={handleCopyWebhookUrl}
-              className="bg-secondary rounded-xl p-4 flex-row items-center gap-3 active:bg-secondary/80"
-            >
+              className="flex-row items-center gap-3 rounded-2xl bg-secondary p-4 active:bg-secondary/80">
               <View className="flex-1">
-                <Text className="text-foreground text-xs font-mono" numberOfLines={2}>
+                <Text className="font-mono text-xs text-foreground" numberOfLines={2}>
                   {trigger.webhook_url}
                 </Text>
               </View>
@@ -446,12 +416,14 @@ export function TriggerDetailPage({ triggerId }: TriggerDetailPageProps) {
         {/* Actions */}
         <Section title="Actions">
           <View className="gap-3">
-            {/* <ActionButton
+            <ActionButton
               icon={Edit}
               label="Edit Trigger"
-              onPress={() => {}}
-              disabled
-            /> */}
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                setShowEditDrawer(true);
+              }}
+            />
             <ActionButton
               icon={Trash2}
               label="Delete Trigger"
@@ -462,6 +434,18 @@ export function TriggerDetailPage({ triggerId }: TriggerDetailPageProps) {
           </View>
         </Section>
       </ScrollView>
+
+      {/* Edit Drawer */}
+      <TriggerCreationDrawer
+        visible={showEditDrawer}
+        onClose={() => setShowEditDrawer(false)}
+        onTriggerUpdated={(triggerId) => {
+          refetch();
+          setShowEditDrawer(false);
+        }}
+        isEditMode={true}
+        existingTrigger={trigger || null}
+      />
     </View>
   );
 }

@@ -11,9 +11,9 @@ import hmac
 from core.services.supabase import DBConnection
 from core.utils.auth_utils import verify_and_get_user_id_from_jwt
 from core.utils.logger import logger
-from core.utils.config import config
+from core.utils.config import config, EnvMode
 # Billing checks now handled by billing_integration.check_model_and_billing_access
-from core.billing.billing_integration import billing_integration
+from core.billing.credits.integration import billing_integration
 
 from .trigger_service import get_trigger_service, TriggerType
 from .provider_service import get_provider_service
@@ -98,7 +98,7 @@ async def verify_and_authorize_trigger_agent_access(agent_id: str, user_id: str)
     result = await client.table('agents').select('agent_id').eq('agent_id', agent_id).eq('account_id', user_id).execute()
     
     if not result.data:
-        raise HTTPException(status_code=404, detail="Agent not found or access denied")
+        raise HTTPException(status_code=404, detail="Worker not found or access denied")
 
 
 async def sync_triggers_to_version_config(agent_id: str):
@@ -138,6 +138,13 @@ async def sync_triggers_to_version_config(agent_id: str):
         await client.table('agent_versions').update({'config': config}).eq('version_id', current_version_id).execute()
         
         logger.debug(f"Synced {len(triggers)} triggers to version config for agent {agent_id}")
+        
+        try:
+            from core.cache.runtime_cache import invalidate_agent_config_cache
+            await invalidate_agent_config_cache(agent_id)
+            logger.debug(f"🗑️ Invalidated cache for agent {agent_id} after trigger sync")
+        except Exception as cache_error:
+            logger.warning(f"Cache invalidation failed for agent {agent_id}: {cache_error}")
         
     except Exception as e:
         logger.error(f"Failed to sync triggers to version config: {e}")
@@ -196,70 +203,8 @@ async def get_all_user_triggers(
     user_id: str = Depends(verify_and_get_user_id_from_jwt)
 ):
     try:
-        client = await db.client
-        
-        agents_result = await client.table('agents').select(
-            'agent_id, name, description, current_version_id, icon_name, icon_color, icon_background'
-        ).eq('account_id', user_id).execute()
-        
-        if not agents_result.data:
-            return []
-        
-        agent_info = {}
-        for agent in agents_result.data:
-            agent_name = agent.get('name', 'Untitled Agent')
-            agent_description = agent.get('description', '')
-            
-            agent_info[agent['agent_id']] = {
-                'agent_name': agent_name,
-                'agent_description': agent_description,
-                'icon_name': agent.get('icon_name'),
-                'icon_color': agent.get('icon_color'),
-                'icon_background': agent.get('icon_background')
-            }
-        
-        agent_ids = [agent['agent_id'] for agent in agents_result.data]
-        triggers_result = await client.table('agent_triggers').select('*').in_('agent_id', agent_ids).execute()
-        
-        if not triggers_result.data:
-            return []
-        
-        responses = []
-        for trigger in triggers_result.data:
-            agent_id = trigger['agent_id']
-
-            config = trigger.get('config', {})
-            if isinstance(config, str):
-                try:
-                    import json
-                    config = json.loads(config)
-                except json.JSONDecodeError:
-                    config = {}
-            
-            response_data = {
-                'trigger_id': trigger['trigger_id'],
-                'agent_id': agent_id,
-                'trigger_type': trigger['trigger_type'],
-                'provider_id': trigger.get('provider_id', ''),
-                'name': trigger['name'],
-                'description': trigger.get('description'),
-                'is_active': trigger.get('is_active', False),
-                'webhook_url': None,
-                'created_at': trigger['created_at'],
-                'updated_at': trigger['updated_at'],
-                'config': config,
-                'agent_name': agent_info.get(agent_id, {}).get('agent_name', 'Untitled Agent'),
-                'agent_description': agent_info.get(agent_id, {}).get('agent_description', ''),
-                'icon_name': agent_info.get(agent_id, {}).get('icon_name'),
-                'icon_color': agent_info.get(agent_id, {}).get('icon_color'),
-                'icon_background': agent_info.get(agent_id, {}).get('icon_background')
-            }
-            
-            responses.append(response_data)
-        responses.sort(key=lambda x: x['updated_at'], reverse=True)
-        
-        return responses
-        
+        from core.triggers.repo import get_all_user_triggers as repo_get_triggers
+        return await repo_get_triggers(user_id)
     except Exception as e:
         logger.error(f"Error getting all user triggers: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -341,11 +286,31 @@ async def create_agent_trigger(
     request: TriggerCreateRequest,
     user_id: str = Depends(verify_and_get_user_id_from_jwt)
 ):
-    """Create a new trigger for an agent"""
-        
     await verify_and_authorize_trigger_agent_access(agent_id, user_id)
     
     try:
+        if config.ENV_MODE != EnvMode.LOCAL:
+            client = await db.client
+            
+            provider_service = get_provider_service(db)
+            provider_trigger_type = await provider_service.get_provider_trigger_type(request.provider_id)
+            trigger_type_str = 'scheduled' if provider_trigger_type.value == 'schedule' else 'app'
+            
+            from core.utils.limits_checker import check_trigger_limit
+            limit_check = await check_trigger_limit(user_id, agent_id, trigger_type_str)
+            
+            if not limit_check['can_create']:
+                error_detail = {
+                    "message": f"Maximum of {limit_check['limit']} {trigger_type_str} triggers allowed for your current plan. You have {limit_check['current_count']} {trigger_type_str} triggers.",
+                    "current_count": limit_check['current_count'],
+                    "limit": limit_check['limit'],
+                    "tier_name": limit_check['tier_name'],
+                    "trigger_type": trigger_type_str,
+                    "error_code": "TRIGGER_LIMIT_EXCEEDED"
+                }
+                logger.warning(f"Trigger limit exceeded for account {user_id}: {limit_check['current_count']}/{limit_check['limit']} {trigger_type_str} triggers")
+                raise HTTPException(status_code=402, detail=error_detail)
+        
         trigger_service = get_trigger_service(db)
         
         trigger = await trigger_service.create_trigger(
@@ -356,7 +321,6 @@ async def create_agent_trigger(
             description=request.description
         )
         
-        # Sync triggers to version config after creation
         await sync_triggers_to_version_config(agent_id)
         
         return TriggerResponse(
@@ -375,6 +339,8 @@ async def create_agent_trigger(
         
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating trigger: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -496,6 +462,105 @@ async def delete_trigger(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+class TriggerExecution(BaseModel):
+    """Represents a single trigger execution (agent run)"""
+    execution_id: str
+    thread_id: str
+    trigger_id: str
+    agent_id: str
+    status: str
+    started_at: str
+    completed_at: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+class TriggerExecutionHistoryResponse(BaseModel):
+    """Response for trigger execution history"""
+    executions: List[TriggerExecution]
+    total_count: int
+    next_run_time: Optional[str] = None
+    next_run_time_local: Optional[str] = None
+    timezone: Optional[str] = None
+    human_readable_schedule: Optional[str] = None
+
+
+@router.get("/{trigger_id}/executions", response_model=TriggerExecutionHistoryResponse)
+async def get_trigger_executions(
+    trigger_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    user_id: str = Depends(verify_and_get_user_id_from_jwt)
+):
+    """Get execution history for a trigger (past runs and next scheduled run)"""
+    
+    try:
+        trigger_service = get_trigger_service(db)
+        trigger = await trigger_service.get_trigger(trigger_id)
+        
+        if not trigger:
+            raise HTTPException(status_code=404, detail="Trigger not found")
+        
+        await verify_and_authorize_trigger_agent_access(trigger.agent_id, user_id)
+        
+        client = await db.client
+
+        runs_result = await client.table('agent_runs').select(
+            'id, thread_id, agent_id, status, created_at, completed_at, error, metadata'
+        ).eq(
+            'metadata->>trigger_id', trigger_id
+        ).order(
+            'created_at', desc=True
+        ).limit(limit).execute()
+        
+        executions = []
+        for run in runs_result.data or []:
+            executions.append(TriggerExecution(
+                execution_id=run['id'],
+                thread_id=run['thread_id'],
+                trigger_id=trigger_id,
+                agent_id=run['agent_id'],
+                status=run['status'],
+                started_at=run['created_at'],
+                completed_at=run.get('completed_at'),
+                error_message=run.get('error')
+            ))
+        
+        # Calculate next run time for scheduled triggers
+        next_run_time = None
+        next_run_time_local = None
+        user_timezone = None
+        human_readable = None
+        
+        if trigger.trigger_type == TriggerType.SCHEDULE and trigger.is_active:
+            cron_expression = trigger.config.get('cron_expression')
+            user_timezone = trigger.config.get('timezone', 'UTC')
+            
+            if cron_expression:
+                import pytz
+                next_run = get_next_run_time(cron_expression, user_timezone)
+                if next_run:
+                    next_run_time = next_run.isoformat()
+                    local_tz = pytz.timezone(user_timezone)
+                    next_run_local = next_run.astimezone(local_tz)
+                    next_run_time_local = next_run_local.isoformat()
+                
+                human_readable = get_human_readable_schedule(cron_expression, user_timezone)
+        
+        return TriggerExecutionHistoryResponse(
+            executions=executions,
+            total_count=len(executions),
+            next_run_time=next_run_time,
+            next_run_time_local=next_run_time_local,
+            timezone=user_timezone,
+            human_readable_schedule=human_readable
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting trigger executions: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.post("/{trigger_id}/webhook")
 async def trigger_webhook(
     trigger_id: str,
@@ -558,7 +623,7 @@ async def trigger_webhook(
                 
                 return JSONResponse(content={
                     "success": True,
-                    "message": "Trigger processed and agent execution started",
+                    "message": "Trigger processed and worker execution started",
                     "execution": execution_result,
                     "trigger_result": {
                         "should_execute_agent": result.should_execute_agent,

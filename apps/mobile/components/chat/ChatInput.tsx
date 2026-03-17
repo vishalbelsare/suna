@@ -1,25 +1,38 @@
 import { Icon } from '@/components/ui/icon';
 import { Text } from '@/components/ui/text';
 import { useLanguage } from '@/contexts';
-import { BlurView } from 'expo-blur';
-import { AudioLines, CornerDownLeft, Paperclip, X, Image, Presentation, Table2, FileText, Users, Search, Square, Loader2 } from 'lucide-react-native';
+import { AudioLines, CornerDownLeft, Paperclip, X } from 'lucide-react-native';
+import { StopIcon } from '@/components/ui/StopIcon';
 import { useColorScheme } from 'nativewind';
 import * as React from 'react';
-import { Keyboard, Pressable, ScrollView, TextInput, View, type ViewProps } from 'react-native';
-import Animated, { 
-  useAnimatedStyle, 
-  useSharedValue, 
+import { Keyboard, Pressable, TextInput, View, Platform, TouchableOpacity, type ViewProps, type NativeSyntheticEvent, type TextInputSelectionChangeEventData } from 'react-native';
+import Animated, {
+  useAnimatedStyle,
+  useSharedValue,
   withSpring,
   withTiming,
-  withRepeat 
+  withRepeat,
+  runOnJS,
+  interpolate,
 } from 'react-native-reanimated';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import type { Attachment } from '@/hooks/useChat';
 import { AgentSelector } from '../agents/AgentSelector';
 import { AudioWaveform } from '../attachments/AudioWaveform';
 import type { Agent } from '@/api/types';
+import { MarkdownToolbar, insertMarkdownFormat, type MarkdownFormat } from './MarkdownToolbar';
+import { log } from '@/lib/logger';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
-const AnimatedView = Animated.createAnimatedComponent(View);
+
+// Threshold for swipe down to dismiss keyboard (in pixels)
+const SWIPE_DOWN_THRESHOLD = 30;
+
+// Spring config - defined once outside component
+const SPRING_CONFIG = { damping: 15, stiffness: 400 };
+
+// Android hit slop for better touch targets
+const ANDROID_HIT_SLOP = Platform.OS === 'android' ? { top: 10, bottom: 10, left: 10, right: 10 } : undefined;
 
 export interface ChatInputRef {
   focus: () => void;
@@ -39,35 +52,34 @@ interface ChatInputProps extends ViewProps {
   agent?: Agent;
   isRecording?: boolean;
   recordingDuration?: number;
+  audioLevel?: number;
+  audioLevels?: number[];
   attachments?: Attachment[];
   onRemoveAttachment?: (index: number) => void;
   selectedQuickAction?: string | null;
+  selectedQuickActionOption?: string | null;
   onClearQuickAction?: () => void;
   isAuthenticated?: boolean;
-  onOpenAuthDrawer?: () => void;
   isAgentRunning?: boolean;
   isSendingMessage?: boolean;
   isTranscribing?: boolean;
 }
 
+// Format duration as M:SS - pure function outside component
+const formatDuration = (seconds: number): string => {
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+};
+
+
 /**
  * ChatInput Component
- * Clean implementation with attachment support and built-in authentication handling
- * 
- * Features:
- * - Multi-line text input
- * - Attachment preview with remove capability
- * - Dynamic height based on content
- * - Audio recording mode
- * - Agent selector
- * - Send button
- * - Authentication checks before sending
- * - Auto-clear input after successful send
- * - Programmatic focus support
+ * Optimized for performance with memoized handlers and reduced re-renders
  */
-export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({ 
-  value, 
-  onChangeText, 
+export const ChatInput = React.memo(React.forwardRef<ChatInputRef, ChatInputProps>(({
+  value,
+  onChangeText,
   onSendMessage,
   onSendAudio,
   onAttachPress,
@@ -79,112 +91,166 @@ export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({
   agent,
   isRecording = false,
   recordingDuration = 0,
+  audioLevel = 0,
+  audioLevels = [],
   attachments = [],
   onRemoveAttachment,
   selectedQuickAction,
+  selectedQuickActionOption,
   onClearQuickAction,
   isAuthenticated = true,
-  onOpenAuthDrawer,
   isAgentRunning = false,
   isSendingMessage = false,
   isTranscribing = false,
   style,
-  ...props 
+  ...props
 }, ref) => {
-  // Animation values for buttons
+  // Animation shared values
   const attachScale = useSharedValue(1);
   const cancelScale = useSharedValue(1);
   const stopScale = useSharedValue(1);
   const sendScale = useSharedValue(1);
   const pulseOpacity = useSharedValue(1);
   const rotation = useSharedValue(0);
-  
+
   // TextInput ref for programmatic focus
   const textInputRef = React.useRef<TextInput>(null);
-  
+  // Track text value in ref for instant access (no render cycle)
+  const textValueRef = React.useRef(value || '');
+
+  // State - minimal state only
+  const [isFocused, setIsFocused] = React.useState(false);
+  const [selection, setSelection] = React.useState({ start: 0, end: 0 });
+  const [isStopping, setIsStopping] = React.useState(false);
+  // NO localHasText state in parent - NormalMode handles button state locally
+
+  // Android: Clear input imperatively when value prop becomes empty
+  React.useEffect(() => {
+    if (Platform.OS === 'android' && value === '' && textValueRef.current !== '') {
+      textInputRef.current?.clear();
+      textValueRef.current = '';
+    }
+  }, [value]);
+  const { colorScheme } = useColorScheme();
+  const { t } = useLanguage();
+
+  // Helper to dismiss keyboard - needs to be called from worklet via runOnJS
+  const dismissKeyboard = React.useCallback(() => {
+    Keyboard.dismiss();
+  }, []);
+
+  // Swipe down gesture to dismiss keyboard
+  // Only triggers on downward swipe with enough velocity/distance
+  const swipeDownGesture = React.useMemo(() =>
+    Gesture.Pan()
+      .onEnd((event) => {
+        // Only dismiss if:
+        // 1. Swipe is primarily downward (translationY > threshold)
+        // 2. Swipe is more vertical than horizontal
+        // 3. Velocity is downward
+        const isDownwardSwipe = event.translationY > SWIPE_DOWN_THRESHOLD;
+        const isVertical = Math.abs(event.translationY) > Math.abs(event.translationX);
+        const hasDownwardVelocity = event.velocityY > 0;
+
+        if (isDownwardSwipe && isVertical && hasDownwardVelocity) {
+          runOnJS(dismissKeyboard)();
+        }
+      })
+      .minDistance(SWIPE_DOWN_THRESHOLD)
+      .activeOffsetY(SWIPE_DOWN_THRESHOLD) // Only activate on downward movement
+    , [dismissKeyboard]);
+
+  // Derived values - use ref for hasText to avoid re-renders
+  const hasAttachments = attachments.length > 0;
+  const hasUploadingFiles = attachments.some(a => a.status === 'uploading' || a.isUploading);
+  // hasContent computed from ref - no state dependency
+  const getHasContent = React.useCallback(() => {
+    return !!(textValueRef.current && textValueRef.current.trim()) || attachments.length > 0;
+  }, [attachments.length]);
+  const hasAgent = !!agent?.agent_id;
+  // Allow input to be editable during streaming - only disable when sending or transcribing
+  const isDisabled = isSendingMessage || isTranscribing;
+
+  // Reset stopping state when activity stops
+  React.useEffect(() => {
+    if (!isAgentRunning && !isSendingMessage && !isTranscribing) {
+      setIsStopping(false);
+    }
+  }, [isAgentRunning, isSendingMessage, isTranscribing]);
+
+  // Sync ref when value prop changes from outside (e.g., after send clears input)
+  React.useEffect(() => {
+    textValueRef.current = value || '';
+  }, [value]);
+
+
+  // Memoized placeholder
+  const effectivePlaceholder = React.useMemo(
+    () => placeholder || t('chat.placeholder'),
+    [placeholder, t]
+  );
+
+  // Simple native approach - no complex calculations
+  // TextInput grows naturally, we just clamp the max
+  const MAX_INPUT_HEIGHT = 72; // ~3-4 lines before scroll
+
+  // Recording status text
+  const recordingStatusText = isTranscribing ? 'Transcribing...' : formatDuration(recordingDuration);
+
+  // Placeholder color based on color scheme
+  const placeholderTextColor = React.useMemo(
+    () => colorScheme === 'dark' ? 'rgba(248, 248, 248, 0.4)' : 'rgba(18, 18, 21, 0.4)',
+    [colorScheme]
+  );
+
+  // Text input style - memoized
+  const textInputStyle = React.useMemo(() => ({
+    fontFamily: 'Roobert-Regular',
+    fontSize: 16,
+    lineHeight: 22,
+    opacity: isDisabled ? 0.5 : 1,
+  }), [isDisabled]);
+
   // Expose focus method via ref
   React.useImperativeHandle(ref, () => ({
     focus: () => {
-      console.log('🎯 Focusing chat input');
       textInputRef.current?.focus();
     },
   }), []);
-  
-  // Pulsing animation for agent running state
+
+  // Dismiss keyboard when recording starts
+  React.useEffect(() => {
+    if (isRecording) {
+      Keyboard.dismiss();
+    }
+  }, [isRecording]);
+
+  // Animation effects
   React.useEffect(() => {
     if (isAgentRunning) {
       pulseOpacity.value = withRepeat(
-        withTiming(0.5, { duration: 1000 }),
+        withTiming(0.85, { duration: 1500 }),
         -1,
         true
       );
     } else {
       pulseOpacity.value = withTiming(1, { duration: 300 });
     }
-  }, [isAgentRunning]);
-  
-  // Rotating animation for sending state
+  }, [isAgentRunning, pulseOpacity]);
+
   React.useEffect(() => {
-    if (isSendingMessage) {
+    if (isSendingMessage || isTranscribing) {
       rotation.value = withRepeat(
         withTiming(360, { duration: 1000 }),
         -1,
         false
       );
     } else {
-      rotation.value = withTiming(0, { duration: 0 });
+      rotation.value = 0;
     }
-  }, [isSendingMessage]);
-  
-  // States
-  const { colorScheme } = useColorScheme();
-  const { t } = useLanguage();
-  const hasText = value && value.trim();
-  const hasAttachments = attachments.length > 0;
-  const hasContent = hasText || hasAttachments;
-  const [contentHeight, setContentHeight] = React.useState(0);
-  const lastLoggedHeightRef = React.useRef(0);
-  
-  // Use translated placeholder if not provided
-  const effectivePlaceholder = placeholder || t('chat.placeholder');
-  
-  // Get icon for selected quick action
-  const getQuickActionIcon = () => {
-    switch (selectedQuickAction) {
-      case 'image': return Image;
-      case 'slides': return Presentation;
-      case 'data': return Table2;
-      case 'docs': return FileText;
-      case 'people': return Users;
-      case 'research': return Search;
-      default: return null;
-    }
-  };
-  
-  const getQuickActionLabel = () => {
-    switch (selectedQuickAction) {
-      case 'image': return t('quickActions.image');
-      case 'slides': return t('quickActions.slides');
-      case 'data': return t('quickActions.data');
-      case 'docs': return t('quickActions.docs');
-      case 'people': return t('quickActions.people');
-      case 'research': return t('quickActions.research');
-      default: return null;
-    }
-  };
-  
-  const QuickActionIcon = getQuickActionIcon();
-  
-  // Calculate dynamic height based on content
-  const dynamicHeight = React.useMemo(() => {
-    const baseHeight = 140;
-    const maxHeight = 280;
-    // No longer need attachment height as they're external
-    const calculatedHeight = contentHeight + 80; // Add padding for controls
-    return Math.max(baseHeight, Math.min(calculatedHeight, maxHeight));
-  }, [contentHeight]);
+  }, [isSendingMessage, isTranscribing, rotation]);
 
-  // Animated styles
+  // Animated styles - these are worklet functions, stable references
   const attachAnimatedStyle = useAnimatedStyle(() => ({
     transform: [{ scale: attachScale.value }],
   }));
@@ -201,331 +267,468 @@ export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({
     transform: [{ scale: sendScale.value }],
     opacity: pulseOpacity.value,
   }));
-  
+
   const rotationAnimatedStyle = useAnimatedStyle(() => ({
     transform: [{ rotate: `${rotation.value}deg` }],
   }));
 
-  // Handle sending text message - checks auth first
-  const handleSendMessage = () => {
+  // Memoized press handlers using useCallback
+  const handleAttachPressIn = React.useCallback(() => {
+    attachScale.value = withSpring(0.9, SPRING_CONFIG);
+  }, [attachScale]);
+
+  const handleAttachPressOut = React.useCallback(() => {
+    attachScale.value = withSpring(1, SPRING_CONFIG);
+  }, [attachScale]);
+
+  const handleCancelPressIn = React.useCallback(() => {
+    cancelScale.value = withSpring(0.9, SPRING_CONFIG);
+  }, [cancelScale]);
+
+  const handleCancelPressOut = React.useCallback(() => {
+    cancelScale.value = withSpring(1, SPRING_CONFIG);
+  }, [cancelScale]);
+
+  const handleStopPressIn = React.useCallback(() => {
+    stopScale.value = withSpring(0.9, SPRING_CONFIG);
+  }, [stopScale]);
+
+  const handleStopPressOut = React.useCallback(() => {
+    stopScale.value = withSpring(1, SPRING_CONFIG);
+  }, [stopScale]);
+
+  const handleSendPressIn = React.useCallback(() => {
+    sendScale.value = withSpring(0.9, SPRING_CONFIG);
+  }, [sendScale]);
+
+  const handleSendPressOut = React.useCallback(() => {
+    sendScale.value = withSpring(1, SPRING_CONFIG);
+  }, [sendScale]);
+
+  // Handle sending text message
+  const handleSendMessage = React.useCallback(() => {
     if (!value?.trim()) return;
-    
-    // Check authentication before sending
+
     if (!isAuthenticated) {
-      console.log('🔐 User not authenticated, showing auth drawer');
-      console.log('⏰ Timestamp:', new Date().toISOString());
-      console.log('📝 Input value:', value);
-      console.log('📊 Input length:', value.length);
-      
-      // Dismiss keyboard first for better UX
-      Keyboard.dismiss();
-      
-      // Wait for keyboard to dismiss, then open auth screen
-      setTimeout(() => {
-        console.log('🔐 Opening auth screen after keyboard dismissal');
-        onOpenAuthDrawer?.();
-      }, 200); // Small delay for smooth transition
-      
+      log.warn('⚠️ User not authenticated - cannot send message');
       return;
     }
-    
-    console.log('✅ User authenticated, sending message');
+
+    if (!agent?.agent_id) {
+      log.warn('⚠️ No agent selected - cannot send message');
+      return;
+    }
+
     // Don't clear input here - let useChat handle it after successful send
     // Trim trailing spaces before sending
-    onSendMessage?.(value.trim(), agent?.agent_id || '', agent?.name || '');
-  };
+    onSendMessage?.(value.trim(), agent.agent_id, agent.name || '');
+  }, [value, isAuthenticated, onSendMessage, agent]);
 
-  // Handle sending audio - also checks auth
-  const handleSendAudioMessage = () => {
-    // Check authentication before sending audio
+  // Handle sending audio
+  const handleSendAudioMessage = React.useCallback(async () => {
     if (!isAuthenticated) {
-      console.log('🔐 User not authenticated, showing auth drawer (audio)');
-      console.log('⏰ Timestamp:', new Date().toISOString());
-      console.log('🎤 Recording duration:', recordingDuration);
-      
-      // Cancel recording first
+      log.warn('⚠️ User not authenticated - cannot send audio');
       onCancelRecording?.();
-      
-      // Wait a bit, then open auth screen
-      setTimeout(() => {
-        console.log('🔐 Opening auth screen after canceling recording');
-        onOpenAuthDrawer?.();
-      }, 200);
-      
       return;
     }
-    
-    // User is authenticated, send audio normally
-    console.log('✅ User authenticated, sending audio');
-    onSendAudio?.();
-  };
 
-  const handleButtonPress = () => {
-    if (isAgentRunning) {
-      // Stop agent run
-      console.log('🛑 Stop agent run pressed');
-      onStopAgentRun?.();
-    } else if (isRecording) {
-      // Send audio recording
-      handleSendAudioMessage();
-    } else if (hasContent) {
-      // Send text message
-      console.log('📤 Send button pressed');
-      console.log('📝 Has text:', !!hasText);
-      console.log('📎 Has attachments:', hasAttachments, `(${attachments.length})`);
-      handleSendMessage();
-    } else {
-      // Start audio recording
-      console.log('🎤 Audio record button pressed');
-      onAudioRecord?.();
+    if (!onSendAudio) {
+      log.error('❌ onSendAudio handler is not provided');
+      return;
     }
-  };
 
-  // Format duration as M:SS
-  const formatDuration = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
-  
-  // Show transcription status in recording mode
-  const recordingStatusText = isTranscribing 
-    ? 'Transcribing...' 
-    : formatDuration(recordingDuration);
+    try {
+      log.log('📤 ChatInput: Calling onSendAudio handler');
+      await onSendAudio();
+      log.log('✅ ChatInput: onSendAudio completed successfully');
+    } catch (error) {
+      log.error('❌ ChatInput: Error in onSendAudio:', error);
+    }
+  }, [isAuthenticated, onCancelRecording, onSendAudio]);
+
+  // Main button press handler
+  const handleButtonPress = React.useCallback(() => {
+    const hasContent = getHasContent(); // Compute from ref at press time
+    log.log('[ChatInput] 🔘 Button pressed!', { isAgentRunning, isRecording, hasContent, hasAgent, isSendingMessage, isTranscribing, isStopping, hasUploadingFiles });
+
+    // Priority 1: Stop if agent is running OR if we're in sending/transcribing state
+    if (isAgentRunning || isSendingMessage || isTranscribing) {
+      log.log('[ChatInput] 🛑 Calling onStopAgentRun (isAgentRunning:', isAgentRunning, ', isSendingMessage:', isSendingMessage, ')');
+      setIsStopping(true);
+      onStopAgentRun?.();
+      return;
+    }
+
+    // Priority 2: Handle recording
+    if (isRecording) {
+      handleSendAudioMessage();
+      return;
+    }
+
+    // Priority 3: Send message if has content (but NOT if files are uploading)
+    if (hasContent) {
+      if (hasUploadingFiles) {
+        log.warn('⚠️ Files are still uploading - cannot send message yet');
+        return;
+      }
+      if (!hasAgent) {
+        log.warn('⚠️ No agent selected - cannot send message');
+        return;
+      }
+      handleSendMessage();
+      return;
+    }
+
+    // Priority 4: Start audio recording
+    if (!isAuthenticated) {
+      log.warn('⚠️ User not authenticated - cannot record audio');
+      return;
+    }
+    if (!hasAgent) {
+      log.warn('⚠️ No agent selected - cannot record audio');
+      return;
+    }
+    onAudioRecord?.();
+  }, [isAgentRunning, isRecording, getHasContent, hasAgent, isSendingMessage, isTranscribing, isStopping, isAuthenticated, hasUploadingFiles, onStopAgentRun, handleSendAudioMessage, handleSendMessage, onAudioRecord]);
+
+  // Selection change handler to track cursor position
+  const handleSelectionChange = React.useCallback(
+    (e: NativeSyntheticEvent<TextInputSelectionChangeEventData>) => {
+      setSelection(e.nativeEvent.selection);
+    },
+    []
+  );
+
+  // Focus/blur handlers
+  const handleFocus = React.useCallback(() => {
+    if (!isAuthenticated) {
+      textInputRef.current?.blur();
+      return;
+    }
+    setIsFocused(true);
+  }, [isAuthenticated]);
+
+  const handleBlur = React.useCallback(() => {
+    // Delay hiding toolbar to allow button press to register
+    setTimeout(() => setIsFocused(false), 150);
+  }, []);
+
+  // Markdown format handler
+  const handleMarkdownFormat = React.useCallback(
+    (format: MarkdownFormat, extra?: string) => {
+      const currentText = value || '';
+      const { newText, newCursorPosition, newSelectionEnd } = insertMarkdownFormat(
+        currentText,
+        selection.start,
+        selection.end,
+        format,
+        extra
+      );
+      onChangeText?.(newText);
+      // Update selection
+      setSelection({ start: newCursorPosition, end: newSelectionEnd });
+      // Refocus the input
+      textInputRef.current?.focus();
+    },
+    [value, selection, onChangeText]
+  );
+
+  // Parent's onChangeText - NO STATE UPDATE, just ref + forward to parent prop
+  // NormalMode handles button icon locally - parent doesn't need to re-render
+  const handleChangeText = React.useCallback((text: string) => {
+    textValueRef.current = text;
+    onChangeText?.(text);
+  }, [onChangeText]);
+
+  // Memoized attach button style
+  const attachButtonStyle = React.useMemo(
+    () => [attachAnimatedStyle, { opacity: isDisabled ? 0.4 : 1 }],
+    [attachAnimatedStyle, isDisabled]
+  );
 
   return (
-    <View 
-      className="relative rounded-3xl border border-border overflow-hidden"
-      style={[
-        { height: dynamicHeight }, 
-        style
-      ]}
-      {...props}
-    >
-      {/* Blur Background */}
-      <BlurView
-        intensity={80}
-        tint={colorScheme === 'dark' ? 'dark' : 'light'}
-        className="absolute inset-0"
-      />
-      
-      {/* Semi-transparent background overlay */}
-      <View 
-        className="absolute inset-0"
-        style={{ 
-          backgroundColor: colorScheme === 'dark' 
-            ? 'rgba(22, 22, 24, 0.7)' 
-            : 'rgba(255, 255, 255, 0.7)' 
-        }}
-      />
-
-      {/* Main Container */}
-      <View className="p-4 flex-1">
-        {isRecording ? (
-          /* Recording Mode UI */
-          <>
-            {/* Waveform */}
-            <View className="flex-1 items-center bottom-5 justify-center">
-              <AudioWaveform isRecording={true} barCount={42} />
-            </View>
-            
-            {/* Timer / Transcription Status */}
-            <View className="absolute bottom-6 right-16 items-center">
-              <Text className="text-xs font-roobert-medium text-foreground/50">
-                {recordingStatusText}
-              </Text>
-            </View>
-            
-            {/* Bottom Controls */}
-            <View className="absolute bottom-4 left-4 right-4 flex-row items-center justify-between">
-              {/* Cancel Button */}
-              <AnimatedPressable 
-                onPressIn={() => {
-                  cancelScale.value = withSpring(0.9, { damping: 15, stiffness: 400 });
-                }}
-                onPressOut={() => {
-                  cancelScale.value = withSpring(1, { damping: 15, stiffness: 400 });
-                }}
-                onPress={onCancelRecording}
-                className="bg-secondary rounded-full items-center justify-center"
-                style={[{ width: 33.75, height: 33.75 }, cancelAnimatedStyle]}
-              >
-                <Icon 
-                  as={X} 
-                  size={16} 
-                  className="text-foreground"
-                  strokeWidth={2}
-                />
-              </AnimatedPressable>
-
-              {/* Stop/Send Button */}
-              <AnimatedPressable 
-                onPressIn={() => {
-                  stopScale.value = withSpring(0.9, { damping: 15, stiffness: 400 });
-                }}
-                onPressOut={() => {
-                  stopScale.value = withSpring(1, { damping: 15, stiffness: 400 });
-                }}
-                onPress={handleSendAudioMessage}
-                className="bg-primary rounded-full items-center justify-center"
-                style={[{ width: 33.75, height: 33.75 }, stopAnimatedStyle]}
-              >
-                <Icon 
-                  as={CornerDownLeft} 
-                  size={15} 
-                  className="text-primary-foreground"
-                  strokeWidth={2}
-                />
-              </AnimatedPressable>
-            </View>
-          </>
-        ) : (
-          /* Normal Text Input Mode */
-          <>
-            {/* Content Area - Text Only */}
-            <View className="flex-1 mb-12">
-              <ScrollView 
-                showsVerticalScrollIndicator={false}
-                keyboardShouldPersistTaps="handled"
-              >
-                {/* Text Input */}
-                <TextInput
-                  ref={textInputRef}
-                  value={value}
-                  onChangeText={onChangeText}
-                  placeholder={effectivePlaceholder}
-                  placeholderTextColor={
-                    colorScheme === 'dark' 
-                      ? 'rgba(248, 248, 248, 0.4)' 
-                      : 'rgba(18, 18, 21, 0.4)'
-                  }
-                  multiline
-                  scrollEnabled={false}
-                  editable={!isSendingMessage && !isAgentRunning && !isTranscribing}
-                  onContentSizeChange={(e) => {
-                    const newHeight = e.nativeEvent.contentSize.height;
-                    // Only log significant changes (every 50px)
-                    if (Math.abs(newHeight - lastLoggedHeightRef.current) >= 50) {
-                      console.log('📏 ChatInput height:', Math.round(newHeight), 'px');
-                      lastLoggedHeightRef.current = newHeight;
-                    }
-                    setContentHeight(newHeight);
-                  }}
-                  className="text-foreground text-base"
-                  style={{ 
-                    fontFamily: 'Roobert-Regular',
-                    minHeight: 52,
-                    opacity: isSendingMessage || isAgentRunning || isTranscribing ? 0.5 : 1,
-                  }}
-                />
-              </ScrollView>
-            </View>
-            
-            {/* Bottom Action Bar */}
-            <View className="absolute bottom-4 left-4 right-4 flex-row items-center justify-between">
-              {/* Left Side - Attach Button & Quick Action Badge */}
-              <View className="flex-row items-center gap-2">
-                {/* Attach Button */}
-                <AnimatedPressable 
-                  onPressIn={() => {
-                    attachScale.value = withSpring(0.9, { damping: 15, stiffness: 400 });
-                  }}
-                  onPressOut={() => {
-                    attachScale.value = withSpring(1, { damping: 15, stiffness: 400 });
-                  }}
-                  onPress={onAttachPress}
-                  disabled={isSendingMessage || isAgentRunning || isTranscribing}
-                  className="bg-primary/5 rounded-full w-9 h-9 items-center justify-center border border-border/30"
-                  style={[
-                    attachAnimatedStyle,
-                    { opacity: isSendingMessage || isAgentRunning || isTranscribing ? 0.4 : 1 }
-                  ]}
-                >
-                  <Icon 
-                    as={Paperclip} 
-                    size={15} 
-                    className="text-foreground"
-                  />
-                </AnimatedPressable>
-
-                {/* Quick Action Context Badge - Entire badge is clickable */}
-                {selectedQuickAction && QuickActionIcon && (
-                  <Pressable 
-                    onPress={() => {
-                      console.log('❌ Clearing quick action context');
-                      onClearQuickAction?.();
-                    }}
-                    className="bg-primary/10 rounded-full flex-row items-center h-9 px-2 border border-primary/20 active:opacity-70"
-                  >
-                    <Icon 
-                      as={QuickActionIcon} 
-                      size={15} 
-                      className="text-primary mr-1"
-                      strokeWidth={2}
-                    />
-                    <Icon 
-                      as={X} 
-                      size={14} 
-                      className="text-primary"
-                      strokeWidth={2}
-                    />
-                  </Pressable>
-                )}
-              </View>
-
-              {/* Right Actions */}
-              <View className="flex-row items-center gap-2">
-                {/* Agent Selector with Full Name */}
-                <AgentSelector onPress={onAgentPress} compact={false} />
-
-                {/* Send/Stop/Audio Button */}
-                <AnimatedPressable 
-                  onPressIn={() => {
-                    sendScale.value = withSpring(0.9, { damping: 15, stiffness: 400 });
-                  }}
-                  onPressOut={() => {
-                    sendScale.value = withSpring(1, { damping: 15, stiffness: 400 });
-                  }}
-                  onPress={handleButtonPress}
-                  disabled={isSendingMessage}
-                  className={`rounded-full items-center justify-center ${
-                    isAgentRunning 
-                      ? 'bg-destructive' 
-                      : 'bg-primary'
-                  }`}
-                  style={[{ width: 33.75, height: 33.75 }, sendAnimatedStyle]}
-                >
-                  {isSendingMessage ? (
-                    <AnimatedView style={rotationAnimatedStyle}>
-                      <Icon 
-                        as={Loader2}
-                        size={15} 
-                        className="text-primary-foreground"
-                        strokeWidth={2}
-                      />
-                    </AnimatedView>
-                  ) : (
-                    <Icon 
-                      as={
-                        isAgentRunning 
-                          ? Square 
-                          : hasContent 
-                            ? CornerDownLeft 
-                            : AudioLines
-                      } 
-                      size={isAgentRunning ? 12 : 15} 
-                      className="text-primary-foreground"
-                      strokeWidth={2}
-                    />
-                  )}
-                </AnimatedPressable>
-              </View>
-            </View>
-          </>
-        )}
+    <GestureDetector gesture={swipeDownGesture}>
+      <View
+        className="rounded-[30px] overflow-hidden bg-card border border-border"
+        style={style}
+        collapsable={false}
+        {...props}
+      >
+        {/* Simple flex layout: text grows, buttons stay at bottom */}
+        <View className="p-4" collapsable={false}>
+          {isRecording ? (
+            <RecordingMode
+              audioLevels={audioLevels}
+              recordingStatusText={recordingStatusText}
+              cancelAnimatedStyle={cancelAnimatedStyle}
+              stopAnimatedStyle={stopAnimatedStyle}
+              onCancelPressIn={handleCancelPressIn}
+              onCancelPressOut={handleCancelPressOut}
+              onCancelRecording={onCancelRecording}
+              onStopPressIn={handleStopPressIn}
+              onStopPressOut={handleStopPressOut}
+              onSendAudio={handleSendAudioMessage}
+            />
+          ) : (
+            <NormalMode
+              textInputRef={textInputRef}
+              value={value}
+              onChangeText={handleChangeText}
+              effectivePlaceholder={effectivePlaceholder}
+              placeholderTextColor={placeholderTextColor}
+              isDisabled={isDisabled}
+              textInputStyle={textInputStyle}
+              maxInputHeight={MAX_INPUT_HEIGHT}
+              onAttachPress={onAttachPress}
+              onAgentPress={onAgentPress}
+              onButtonPress={handleButtonPress}
+              isSendingMessage={isSendingMessage}
+              isTranscribing={isTranscribing}
+              isAgentRunning={isAgentRunning}
+              isStopping={isStopping}
+              isAuthenticated={isAuthenticated}
+              hasAgent={hasAgent}
+              hasAttachments={hasAttachments}
+              hasUploadingFiles={hasUploadingFiles}
+            />
+          )}
+        </View>
       </View>
-    </View>
+    </GestureDetector>
   );
-});
+}));
 
 ChatInput.displayName = 'ChatInput';
+
+// Extracted Recording Mode component for better performance
+interface RecordingModeProps {
+  audioLevels: number[];
+  recordingStatusText: string;
+  cancelAnimatedStyle: any;
+  stopAnimatedStyle: any;
+  onCancelPressIn: () => void;
+  onCancelPressOut: () => void;
+  onCancelRecording?: () => void;
+  onStopPressIn: () => void;
+  onStopPressOut: () => void;
+  onSendAudio: () => void;
+}
+
+const RecordingMode = React.memo(({
+  audioLevels,
+  recordingStatusText,
+  cancelAnimatedStyle,
+  stopAnimatedStyle,
+  onCancelPressIn,
+  onCancelPressOut,
+  onCancelRecording,
+  onStopPressIn,
+  onStopPressOut,
+  onSendAudio,
+}: RecordingModeProps) => (
+  <View style={{ minHeight: 120 }}>
+    <View className="items-center justify-center mb-4" style={{ minHeight: 56 }}>
+      <AudioWaveform isRecording={true} audioLevels={audioLevels} />
+    </View>
+    <View className="flex-row items-center justify-between">
+      <AnimatedPressable
+        onPressIn={onCancelPressIn}
+        onPressOut={onCancelPressOut}
+        onPress={onCancelRecording}
+        className="bg-primary/5 rounded-full items-center justify-center"
+        style={[{ width: 40, height: 40 }, cancelAnimatedStyle]}
+        hitSlop={ANDROID_HIT_SLOP}
+      >
+        <Icon as={X} size={16} className="text-foreground" strokeWidth={2} />
+      </AnimatedPressable>
+      <Text className="text-xs font-roobert-medium text-foreground/50">
+        {recordingStatusText}
+      </Text>
+      <AnimatedPressable
+        onPressIn={onStopPressIn}
+        onPressOut={onStopPressOut}
+        onPress={onSendAudio}
+        className="bg-primary rounded-full items-center justify-center"
+        style={[{ width: 40, height: 40 }, stopAnimatedStyle]}
+        hitSlop={ANDROID_HIT_SLOP}
+      >
+        <Icon as={CornerDownLeft} size={16} className="text-primary-foreground" strokeWidth={2} />
+      </AnimatedPressable>
+    </View>
+  </View>
+));
+
+RecordingMode.displayName = 'RecordingMode';
+
+// Extracted Normal Mode component
+interface NormalModeProps {
+  textInputRef: React.RefObject<TextInput | null>;
+  value?: string;
+  onChangeText?: (text: string) => void;
+  effectivePlaceholder: string;
+  placeholderTextColor: string;
+  isDisabled: boolean;
+  textInputStyle: any;
+  maxInputHeight: number;
+  onAttachPress?: () => void;
+  onAgentPress?: () => void;
+  onButtonPress: () => void;
+  isSendingMessage: boolean;
+  isTranscribing: boolean;
+  isAgentRunning: boolean;
+  isStopping: boolean;
+  isAuthenticated: boolean;
+  hasAgent: boolean;
+  hasAttachments: boolean;
+  hasUploadingFiles: boolean;
+}
+
+// NOT memo'd - we want instant re-renders for button state
+const NormalMode = ({
+  textInputRef,
+  value,
+  onChangeText,
+  effectivePlaceholder,
+  placeholderTextColor,
+  isDisabled,
+  textInputStyle,
+  maxInputHeight,
+  onAttachPress,
+  onAgentPress,
+  onButtonPress,
+  isSendingMessage,
+  isTranscribing,
+  isAgentRunning,
+  isStopping,
+  isAuthenticated,
+  hasAgent,
+  hasAttachments,
+  hasUploadingFiles,
+}: NormalModeProps) => {
+  // REANIMATED shared value for INSTANT button icon switching
+  // This bypasses React rendering entirely - updates on UI thread!
+  const hasContentShared = useSharedValue(!!(value && value.trim()) || hasAttachments ? 1 : 0);
+
+  // Update shared value when hasAttachments changes
+  React.useEffect(() => {
+    hasContentShared.value = (!!(value && value.trim()) || hasAttachments) ? 1 : 0;
+  }, [hasAttachments, value, hasContentShared]);
+
+  // Handle text change - update shared value SYNCHRONOUSLY (no setState!)
+  const handleLocalTextChange = React.useCallback((text: string) => {
+    // Update Reanimated value immediately - no React render needed!
+    hasContentShared.value = (!!(text && text.trim()) || hasAttachments) ? 1 : 0;
+    onChangeText?.(text);
+  }, [onChangeText, hasAttachments, hasContentShared]);
+
+  // Animated styles for icon switching - runs on UI thread!
+  const voiceIconStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(hasContentShared.value, [0, 1], [1, 0]),
+    position: 'absolute' as const,
+  }));
+
+  const sendIconStyle = useAnimatedStyle(() => ({
+    opacity: hasContentShared.value,
+    position: 'absolute' as const,
+  }));
+
+  return (
+    <>
+      {/* TextInput - auto grows, maxHeight triggers scroll */}
+      <TextInput
+        ref={textInputRef}
+        // iOS: controlled, Android: uncontrolled for instant response
+        {...(Platform.OS === 'ios' ? { value } : { defaultValue: value })}
+        onChangeText={handleLocalTextChange}
+        onFocus={() => {
+          if (!isAuthenticated) {
+            textInputRef.current?.blur();
+          }
+        }}
+        placeholder={effectivePlaceholder}
+        placeholderTextColor={placeholderTextColor}
+        multiline
+        // numberOfLines helps Android pre-allocate layout space
+        numberOfLines={Platform.OS === 'android' ? 4 : undefined}
+        scrollEnabled={true}
+        editable={!isDisabled}
+        className="text-foreground text-base"
+        style={[textInputStyle, { maxHeight: maxInputHeight }]}
+        textAlignVertical="top"
+        underlineColorAndroid="transparent"
+        blurOnSubmit={false}
+        returnKeyType="default"
+        autoCorrect={Platform.OS === 'ios'}
+        spellCheck={Platform.OS === 'ios'}
+        autoCapitalize="sentences"
+        keyboardAppearance={Platform.OS === 'ios' ? 'default' : undefined}
+        // submitBehavior helps iOS handle enter key layout
+        submitBehavior="newline"
+      />
+
+      {/* Bottom buttons row - mt-3 for spacing from text */}
+      <View className="flex-row items-center justify-between mt-3">
+        <View className="flex-row items-center gap-2">
+          {/* Use TouchableOpacity on Android - AnimatedPressable blocks touches */}
+          <TouchableOpacity
+            onPress={() => {
+              if (!isAuthenticated) {
+                log.warn('⚠️ User not authenticated - cannot attach');
+                return;
+              }
+              onAttachPress?.();
+            }}
+            disabled={isDisabled}
+            style={{ width: 40, height: 40, borderWidth: 1, borderRadius: 18, alignItems: 'center', justifyContent: 'center', opacity: isDisabled ? 0.4 : 1 }}
+            className="border-border"
+            hitSlop={ANDROID_HIT_SLOP}
+            activeOpacity={0.7}
+          >
+            <Icon as={Paperclip} size={16} className="text-foreground" />
+          </TouchableOpacity>
+        </View>
+
+        <View className="flex-row items-center gap-1">
+          <AgentSelector
+            onPress={onAgentPress}
+            compact={false}
+          />
+
+          {/* Main action button */}
+          <TouchableOpacity
+            onPress={onButtonPress}
+            disabled={isStopping || hasUploadingFiles || (!hasAgent && !isAgentRunning && !isSendingMessage)}
+            style={{ width: 40, height: 40, borderRadius: 18, alignItems: 'center', justifyContent: 'center', opacity: (isStopping || hasUploadingFiles) ? 0.5 : ((!hasAgent && !isAgentRunning && !isSendingMessage) ? 0.4 : 1) }}
+            className={(isAgentRunning || isSendingMessage || isTranscribing || isStopping) ? 'bg-foreground' : 'bg-primary'}
+            hitSlop={ANDROID_HIT_SLOP}
+            activeOpacity={0.7}
+          >
+            {(isSendingMessage || isTranscribing || isAgentRunning || isStopping) ? (
+              <StopIcon size={14} className="text-background" />
+            ) : (
+              // Both icons rendered, Reanimated switches opacity on UI thread (instant!)
+              <>
+                <Animated.View style={voiceIconStyle}>
+                  <Icon
+                    as={AudioLines}
+                    size={18}
+                    className="text-primary-foreground"
+                    strokeWidth={2}
+                  />
+                </Animated.View>
+                <Animated.View style={sendIconStyle}>
+                  <Icon
+                    as={CornerDownLeft}
+                    size={18}
+                    className="text-primary-foreground"
+                    strokeWidth={2}
+                  />
+                </Animated.View>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
+      </View>
+    </>
+  );
+};

@@ -13,7 +13,7 @@ class SunaDefaultAgentService:
     
     async def get_suna_default_config(self) -> Dict[str, Any]:
         """Get the current Suna configuration."""
-        from core.suna_config import SUNA_CONFIG
+        from core.config.suna_config import SUNA_CONFIG
         return SUNA_CONFIG.copy()
     
     async def install_for_all_users(self) -> Dict[str, Any]:
@@ -130,7 +130,7 @@ class SunaDefaultAgentService:
     
     async def _create_suna_agent_for_user(self, account_id: str) -> str:
         """Create a Suna agent for a user."""
-        from core.suna_config import SUNA_CONFIG
+        from core.config.suna_config import SUNA_CONFIG
         
         client = await self._db.client
         
@@ -141,8 +141,8 @@ class SunaDefaultAgentService:
             "description": SUNA_CONFIG["description"],
             "is_default": True,
             "icon_name": "sun",
-            "icon_color": "#F59E0B",
-            "icon_background": "#FFF3CD",
+            "icon_color": "#FFFFFF",
+            "icon_background": "#000000",
             "metadata": {
                 "is_suna_default": True,
                 "centrally_managed": True,
@@ -164,20 +164,27 @@ class SunaDefaultAgentService:
         return agent_id
     
     async def _create_initial_version(self, agent_id: str, account_id: str) -> None:
-        """Create initial version for Suna agent."""
+        """Create initial version for Suna agent.
+        
+        Note: We don't save system_prompt, model, or agentpress_tools for Suna agents
+        since they're always loaded from SUNA_CONFIG in memory. We only save MCPs
+        which are user-specific customizations.
+        """
         try:
             from core.versioning.version_service import get_version_service
-            from core.suna_config import SUNA_CONFIG
+            from core.config.suna_config import SUNA_CONFIG
             
             version_service = await get_version_service()
+            # For Suna agents, only save MCPs (user customizations)
+            # System prompt, model, and tools are always loaded from SUNA_CONFIG
             await version_service.create_version(
                 agent_id=agent_id,
                 user_id=account_id,
-                system_prompt=SUNA_CONFIG["system_prompt"],
+                system_prompt="",  # Not saved for Suna - always from SUNA_CONFIG
                 configured_mcps=SUNA_CONFIG["configured_mcps"],
                 custom_mcps=SUNA_CONFIG["custom_mcps"],
-                agentpress_tools=SUNA_CONFIG["agentpress_tools"],
-                model=SUNA_CONFIG["model"],
+                agentpress_tools={},  # Not saved for Suna - always from SUNA_CONFIG
+                model=None,  # Not saved for Suna - always from SUNA_CONFIG
                 version_name="v1",
                 change_description="Initial Suna agent installation"
             )

@@ -1,7 +1,7 @@
-import httpx
 import tempfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from core.utils.auth_utils import verify_and_get_user_id_from_jwt
 from core.utils.logger import logger
 from core.services.supabase import DBConnection
+from core.services.http_client import get_http_client
 from .google_docs_service import GoogleDocsService
 from .google_slides_service import OAuthTokenService
 
@@ -27,8 +28,8 @@ class ConvertToDocsResponse(BaseModel):
 
 
 async def get_db_connection() -> DBConnection:
+    # Use singleton - already initialized at startup
     db = DBConnection()
-    await db.initialize()
     return db
 
 
@@ -76,10 +77,11 @@ async def convert_and_upload_to_google_docs(
         logger.info(f"Calling sandbox conversion endpoint: POST {convert_url}")
         logger.debug(f"Conversion payload: {convert_payload}")
         
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with get_http_client() as client:
             convert_response = await client.post(
                 convert_url,
-                json=convert_payload
+                json=convert_payload,
+                timeout=120.0
             )
             
             logger.debug(f"Sandbox response status: {convert_response.status_code}")
@@ -99,7 +101,12 @@ async def convert_and_upload_to_google_docs(
             
             filename = "document.docx" 
             content_disposition = convert_response.headers.get("Content-Disposition", "")
-            if "filename=" in content_disposition:
+            if "filename*=UTF-8''" in content_disposition:
+                # RFC5987 format: filename*=UTF-8''encoded_name
+                encoded_name = content_disposition.split("filename*=UTF-8''")[1].split(';')[0]
+                filename = unquote(encoded_name)
+            elif 'filename="' in content_disposition:
+                # Legacy format: filename="name"
                 filename = content_disposition.split('filename="')[1].split('"')[0]
         
         logger.info(f"DOCX conversion successful: {filename}")

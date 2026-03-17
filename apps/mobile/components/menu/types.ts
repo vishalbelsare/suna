@@ -17,12 +17,13 @@ export interface Conversation {
 /**
  * Conversation Section Type
  * 
- * Groups conversations by time period (e.g., "August", "July")
+ * Groups conversations by time period (e.g., "Today", "Yesterday", "This Week")
  * Note: title is removed - format from timestamp in component
  */
 export interface ConversationSection {
   id: string;
   timestamp: Date;
+  periodLabel?: string; // Time period key for localization (today, yesterday, thisWeek, etc.)
   conversations: Conversation[];
 }
 
@@ -43,7 +44,7 @@ export interface BottomNavItem {
  * 
  * Available subscription tiers
  */
-export type TierType = 'Plus' | 'Pro' | 'Ultra';
+export type TierType = 'Basic' | 'Plus' | 'Pro' | 'Ultra';
 
 /**
  * User Profile Type
@@ -56,5 +57,6 @@ export interface UserProfile {
   email: string;
   avatar?: string;
   tier?: TierType;
+  planName?: string; // Plan name from subscription (e.g., 'Plus', 'Pro', 'Ultra')
 }
 

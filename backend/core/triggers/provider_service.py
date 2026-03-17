@@ -7,12 +7,10 @@ from typing import Dict, Any, Optional, List
 
 import croniter
 import pytz
-import httpx
 from core.services.supabase import DBConnection
-
-from core.services.supabase import DBConnection
+from core.services.http_client import get_http_client
 from core.utils.logger import logger
-from core.utils.config import config, EnvMode
+from core.utils.config import config as app_config, EnvMode
 from .trigger_service import Trigger, TriggerEvent, TriggerResult, TriggerType
 
 
@@ -51,8 +49,10 @@ class ScheduleProvider(TriggerProvider):
     async def validate_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         if 'cron_expression' not in config:
             raise ValueError("cron_expression is required for scheduled triggers")
-        
-        if 'agent_prompt' not in config:
+
+        # Check for agent_prompt - must be a non-empty string (not just key presence)
+        agent_prompt = config.get('agent_prompt')
+        if not agent_prompt or not str(agent_prompt).strip():
             raise ValueError("agent_prompt is required for agent execution")
         
         user_timezone = config.get('timezone', 'UTC')
@@ -67,12 +67,28 @@ class ScheduleProvider(TriggerProvider):
         except Exception as e:
             raise ValueError(f"Invalid cron expression: {str(e)}")
         
+        if app_config.ENV_MODE != EnvMode.STAGING:
+            cron_parts = config['cron_expression'].split()
+            if len(cron_parts) == 5:
+                minute, hour, day, month, weekday = cron_parts
+                
+                if hour == '*' and (minute == '*' or minute.startswith('*/')):
+                    raise ValueError("Schedules that run more frequently than once per hour are not allowed. Minimum interval is 1 hour.")
+                
+                if minute.startswith('*/'):
+                    try:
+                        interval = int(minute[2:])
+                        if interval < 60:
+                            raise ValueError("Schedules that run more frequently than once per hour are not allowed. Minimum interval is 1 hour.")
+                    except ValueError:
+                        pass
+        
         return config
     
     async def setup_trigger(self, trigger: Trigger) -> bool:
         try:
-            # Note: webhook_url removed - scheduled triggers may need alternative configuration
-            webhook_url = f"http://localhost:8000/api/triggers/{trigger.trigger_id}/webhook"
+            base_url = app_config.WEBHOOK_BASE_URL or 'http://localhost:8000'
+            webhook_url = f"{base_url}/v1/triggers/{trigger.trigger_id}/webhook"
             cron_expression = trigger.config['cron_expression']
             user_timezone = trigger.config.get('timezone', 'UTC')
 
@@ -91,11 +107,10 @@ class ScheduleProvider(TriggerProvider):
                 "X-Trigger-Source": "schedule"
             }
 
-            # Include simple shared secret header for backend auth
             secret = os.getenv("TRIGGER_WEBHOOK_SECRET")
             if secret:
                 headers["X-Trigger-Secret"] = secret
-            if config.ENV_MODE == EnvMode.STAGING:
+            if app_config.ENV_MODE == EnvMode.STAGING:
                 vercel_bypass_key = os.getenv("VERCEL_PROTECTION_BYPASS_KEY", "")
                 if vercel_bypass_key:
                     headers["X-Vercel-Protection-Bypass"] = vercel_bypass_key
@@ -156,23 +171,31 @@ class ScheduleProvider(TriggerProvider):
     async def process_event(self, trigger: Trigger, event: TriggerEvent) -> TriggerResult:
         try:
             raw_data = event.raw_data
-            
+
             execution_variables = {
                 'scheduled_time': raw_data.get('timestamp'),
                 'trigger_id': event.trigger_id,
                 'agent_id': event.agent_id
             }
-            
+
+            # Try to get agent_prompt from webhook payload first, fallback to trigger config
+            # This handles legacy triggers where the cron payload may not have agent_prompt
             agent_prompt = raw_data.get('agent_prompt')
+            if not agent_prompt or not str(agent_prompt).strip():
+                # Fallback to trigger config (where agent_prompt should be stored)
+                agent_prompt = trigger.config.get('agent_prompt') if trigger.config else None
+
+            if not agent_prompt or not str(agent_prompt).strip():
+                raise ValueError("agent_prompt is required for agent execution. Please update this trigger with valid worker instructions.")
             
-            if not agent_prompt:
-                raise ValueError("agent_prompt is required for agent execution")
+            model = trigger.config.get('model') if trigger.config else None
             
             return TriggerResult(
                 success=True,
                 should_execute_agent=True,
                 agent_prompt=agent_prompt,
-                execution_variables=execution_variables
+                execution_variables=execution_variables,
+                model=model
             )
                 
         except Exception as e:
@@ -182,6 +205,20 @@ class ScheduleProvider(TriggerProvider):
             )
     
     def _convert_cron_to_utc(self, cron_expression: str, user_timezone: str) -> str:
+        """
+        Convert a cron expression from user's timezone to UTC.
+        
+        This handles the conversion of hour/minute values to UTC, accounting for DST.
+        Uses today's date as reference to determine the current DST offset.
+        
+        Note: Due to DST changes, there may be a 1-hour shift during DST transitions.
+        For expressions with wildcards or intervals, returns the original expression.
+        
+        Handles:
+        - Single hour values: "0 9 * * *" 
+        - Comma-separated hours: "0 9,17 * * *"
+        - Day boundary crossing when converting timezones
+        """
         try:
             parts = cron_expression.split()
             if len(parts) != 5:
@@ -189,25 +226,107 @@ class ScheduleProvider(TriggerProvider):
                 
             minute, hour, day, month, weekday = parts
             
-            if minute.startswith('*/') and hour == '*':
+            # If minute or hour contain wildcards or step intervals, we can't convert meaningfully
+            if '*' in minute or '*' in hour or '/' in minute or '/' in hour:
+                logger.debug(f"Cron expression {cron_expression} contains wildcards/intervals - will run in UTC")
                 return cron_expression
-            if hour == '*' or minute == '*':
-                return cron_expression
-                
+            
+            # Check if we're dealing with specific days that would need date adjustment
+            # For safety, only convert expressions with wildcard days (daily schedules)
+            has_specific_day = day != '*' and not day.startswith('*/')
+            has_specific_weekday = weekday != '*' and weekday != '0-6' and weekday != '1-7'
+            
             try:
                 user_tz = pytz.timezone(user_timezone)
-                utc_tz = pytz.UTC
-                now = datetime.now(user_tz)
                 
-                if hour.isdigit() and minute.isdigit():
-                    user_time = user_tz.localize(datetime(now.year, now.month, now.day, int(hour), int(minute)))
-                    utc_time = user_time.astimezone(utc_tz)
-                    return f"{utc_time.minute} {utc_time.hour} {day} {month} {weekday}"
+                # Get today's date in the user's timezone to account for current DST
+                now_in_user_tz = datetime.now(user_tz)
+                reference_date = now_in_user_tz.date()
+                
+                # Parse minute - could be single value or comma-separated
+                if ',' in minute:
+                    minutes = [int(m.strip()) for m in minute.split(',')]
+                else:
+                    minutes = [int(minute)]
+                
+                # Parse hour - could be single value, comma-separated, or range
+                if ',' in hour:
+                    hours = [int(h.strip()) for h in hour.split(',')]
+                elif '-' in hour:
+                    # Range like "9-17"
+                    start, end = hour.split('-')
+                    hours = list(range(int(start), int(end) + 1))
+                else:
+                    hours = [int(hour)]
+                
+                # Convert each hour:minute combination to UTC
+                utc_hours = set()
+                utc_minutes = set()
+                day_offset = 0  # Track if we cross day boundary
+                
+                for h in hours:
+                    for m in minutes:
+                        # Create datetime in user's timezone
+                        user_time_naive = datetime.combine(
+                            reference_date, 
+                            datetime.min.time().replace(hour=h, minute=m)
+                        )
+                        user_time = user_tz.localize(user_time_naive)
+                        
+                        # Convert to UTC
+                        utc_time = user_time.astimezone(timezone.utc)
+                        
+                        utc_hours.add(utc_time.hour)
+                        utc_minutes.add(utc_time.minute)
+                        
+                        # Check for day boundary crossing (only relevant for specific day schedules)
+                        if utc_time.date() != user_time.date():
+                            if utc_time.date() < user_time.date():
+                                day_offset = -1
+                            else:
+                                day_offset = 1
+                
+                # Format the UTC hour and minute parts
+                utc_hour_str = ','.join(str(h) for h in sorted(utc_hours))
+                utc_minute_str = ','.join(str(m) for m in sorted(utc_minutes))
+                
+                # Handle day adjustment for specific day schedules
+                converted_day = day
+                converted_weekday = weekday
+                
+                if day_offset != 0:
+                    if has_specific_day:
+                        # Adjust specific day of month - this is imperfect but handles common cases
+                        if day.isdigit():
+                            new_day = int(day) + day_offset
+                            if 1 <= new_day <= 31:
+                                converted_day = str(new_day)
+                            else:
+                                logger.warning(f"Day boundary crossing results in invalid day {new_day}, keeping original")
+                        else:
+                            logger.warning(f"Complex day specification '{day}' with day boundary crossing - timing may be off by one day")
+                    
+                    if has_specific_weekday:
+                        # Adjust weekday - 0=Sunday, 6=Saturday in cron
+                        if weekday.isdigit():
+                            new_weekday = (int(weekday) + day_offset) % 7
+                            converted_weekday = str(new_weekday)
+                        elif '-' in weekday:
+                            # Range like "1-5" (Mon-Fri)
+                            start, end = weekday.split('-')
+                            new_start = (int(start) + day_offset) % 7
+                            new_end = (int(end) + day_offset) % 7
+                            converted_weekday = f"{new_start}-{new_end}"
+                        else:
+                            logger.warning(f"Complex weekday specification '{weekday}' with day boundary crossing - timing may be off by one day")
+                
+                converted = f"{utc_minute_str} {utc_hour_str} {converted_day} {month} {converted_weekday}"
+                logger.debug(f"Converted cron '{cron_expression}' from {user_timezone} to UTC: '{converted}'")
+                return converted
                     
             except Exception as e:
-                logger.warning(f"Failed to convert timezone for cron expression: {e}")
-                
-            return cron_expression
+                logger.warning(f"Failed to convert timezone for cron expression {cron_expression}: {e}")
+                return cron_expression
             
         except Exception as e:
             logger.error(f"Error converting cron expression to UTC: {e}")
@@ -405,7 +524,6 @@ class ComposioEventProvider(TriggerProvider):
             return 0
         client = await self._db.client
         
-        # Use PostgreSQL JSON operator for exact match
         query = client.table('agent_triggers').select('trigger_id', count='exact').eq('trigger_type', 'webhook').eq('config->>composio_trigger_id', composio_trigger_id)
         
         if exclude_trigger_id:
@@ -422,7 +540,6 @@ class ComposioEventProvider(TriggerProvider):
             return 0
         client = await self._db.client
         
-        # Use PostgreSQL JSON operator for exact match
         query = client.table('agent_triggers').select('trigger_id', count='exact').eq('trigger_type', 'webhook').eq('is_active', True).eq('config->>composio_trigger_id', composio_trigger_id)
         
         if exclude_trigger_id:
@@ -484,12 +601,12 @@ class ComposioEventProvider(TriggerProvider):
                 {"status": "enabled"},
                 {"enabled": True},
             ]
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with get_http_client() as client:
                 for api_base in self._api_bases():
                     url = f"{api_base}/api/v3/trigger_instances/manage/{composio_trigger_id}"
                     for body in payload_candidates:
                         try:
-                            resp = await client.patch(url, headers=self._headers(), json=body)
+                            resp = await client.patch(url, headers=self._headers(), json=body, timeout=10.0)
                             if resp.status_code in (200, 204):
                                 logger.debug(f"Successfully enabled trigger in Composio: {composio_trigger_id}")
                                 return True
@@ -522,12 +639,12 @@ class ComposioEventProvider(TriggerProvider):
                 {"status": "disabled"},
                 {"enabled": False},
             ]
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with get_http_client() as client:
                 for api_base in self._api_bases():
                     url = f"{api_base}/api/v3/trigger_instances/manage/{composio_trigger_id}"
                     for body in payload_candidates:
                         try:
-                            resp = await client.patch(url, headers=self._headers(), json=body)
+                            resp = await client.patch(url, headers=self._headers(), json=body, timeout=10.0)
                             if resp.status_code in (200, 204):
                                 return True
                         except Exception as e:
@@ -553,11 +670,11 @@ class ComposioEventProvider(TriggerProvider):
                 return True
             
             # We're the last trigger, permanently delete from Composio
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with get_http_client() as client:
                 for api_base in self._api_bases():
                     url = f"{api_base}/api/v3/trigger_instances/manage/{composio_trigger_id}"
                     try:
-                        resp = await client.delete(url, headers=self._headers())
+                        resp = await client.delete(url, headers=self._headers(), timeout=10.0)
                         if resp.status_code in (200, 204):
                             return True
                     except Exception:
@@ -587,17 +704,18 @@ class ComposioEventProvider(TriggerProvider):
                 "received_at": datetime.now(timezone.utc).isoformat(),
             }
 
-            # Agent routing
             agent_prompt = trigger.config.get("agent_prompt")
             if not agent_prompt:
-                # Minimal default prompt
                 agent_prompt = f"Process Composio event {trigger_slug or ''}: {json.dumps(raw.get('payload', raw))[:800]}"
+
+            model = trigger.config.get('model') if trigger.config else None
 
             return TriggerResult(
                 success=True,
                 should_execute_agent=True,
                 agent_prompt=agent_prompt,
                 execution_variables=execution_variables,
+                model=model
             )
 
         except Exception as e:

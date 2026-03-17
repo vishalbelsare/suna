@@ -1,11 +1,23 @@
 /**
  * API Type Definitions
- * 
+ *
  * Centralized TypeScript types for all API models and responses
+ * Re-exports shared types for convenience
  */
 
+// Re-export core message types from shared package
+export type {
+  UnifiedMessage,
+  ParsedContent,
+  ParsedMetadata,
+  MessageGroup,
+  AgentStatus,
+  StreamingToolCall,
+  StreamingMetadata,
+} from '@agentpress/shared';
+
 // ============================================================================
-// Chat & Messages
+// Chat & Messages (API-specific)
 // ============================================================================
 
 export interface Message {
@@ -17,20 +29,6 @@ export interface Message {
   metadata: Record<string, any>;
   created_at: string;
   updated_at: string;
-}
-
-// Core unified message type matching backend (used for streaming)
-export interface UnifiedMessage {
-  message_id: string | null; // null for transient stream chunks
-  thread_id: string;
-  type: 'user' | 'assistant' | 'tool' | 'system' | 'status' | 'browser_state' | 'image_context';
-  is_llm_message: boolean;
-  content: string; // JSON string from backend
-  metadata: string; // JSON string from backend
-  created_at: string;
-  updated_at: string;
-  agent_id?: string;
-  sequence?: number;
 }
 
 export interface Thread {
@@ -59,29 +57,7 @@ export interface AgentRun {
   metadata?: Record<string, any>;
 }
 
-// Parsed content structure (from message.content JSON string)
-export interface ParsedContent {
-  role?: 'user' | 'assistant' | 'tool' | 'system';
-  content?: string; // The actual text content
-  status_type?: string; // For status messages: 'tool_started', 'tool_completed', 'thread_run_end', etc.
-  function_name?: string; // For tool calls
-  xml_tag_name?: string; // XML tag for tool
-  arguments?: any; // Tool arguments
-  tool_index?: number; // Index of tool in sequence
-  result?: any; // For tool results
-  is_error?: boolean; // Tool execution error
-  message?: string; // Error/status messages
-  name?: string; // Tool name
-  [key: string]: any;
-}
-
-// Parsed metadata structure (from message.metadata JSON string)
-export interface ParsedMetadata {
-  stream_status?: 'chunk' | 'complete'; // Streaming status for assistant messages
-  thread_run_id?: string;
-  llm_response_id?: string;
-  [key: string]: any;
-}
+// Note: ParsedContent, ParsedMetadata now re-exported from @agentpress/shared/types
 
 export interface StreamEvent {
   event: string;
@@ -96,16 +72,12 @@ export interface ActiveAgentRun {
   started_at: string;
 }
 
-export interface InitiateAgentResponse {
+export interface UnifiedAgentStartResponse {
   thread_id: string;
-  agent_run_id: string | null;
-}
-
-export interface InitiateAgentInput {
-  prompt: string;
-  files?: File[];
-  agent_id?: string;
-  model_name?: string;
+  agent_run_id: string;
+  project_id?: string;
+  sandbox_id?: string;  // Always None - sandbox created lazily
+  status: string;
 }
 
 // ============================================================================
@@ -468,6 +440,69 @@ export interface DiscordTriggerConfig {
   trigger_keywords?: string[];
 }
 
+export interface TriggerApp {
+  slug: string;
+  name: string;
+  logo: string;
+}
+
+// Composio Event Trigger Types
+export interface ComposioTriggerType {
+  slug: string;
+  name: string;
+  description?: string;
+  type: string;
+  instructions?: string;
+  config?: {
+    title?: string;
+    type?: string;
+    properties?: Record<string, any>;
+    required?: string[];
+  };
+  payload?: Record<string, any>;
+  toolkit: {
+    slug: string;
+    name: string;
+    logo?: string;
+  };
+}
+
+export interface ComposioAppsWithTriggersResponse {
+  success: boolean;
+  items: TriggerApp[];
+  total: number;
+}
+
+export interface ComposioAppTriggersResponse {
+  success: boolean;
+  items: ComposioTriggerType[];
+  toolkit: {
+    slug: string;
+    name: string;
+    logo?: string;
+  };
+  total: number;
+}
+
+export interface CreateComposioEventTriggerRequest {
+  agent_id: string;
+  profile_id: string;
+  slug: string;
+  trigger_config: Record<string, any>;
+  route: 'agent';
+  name?: string;
+  agent_prompt?: string;
+  connected_account_id?: string;
+  toolkit_slug?: string;
+  model?: string;
+}
+
+export interface CreateComposioEventTriggerResponse {
+  trigger_id: string;
+  agent_id: string;
+  [key: string]: any;
+}
+
 // Request/Response Types
 export interface TriggerCreateRequest {
   provider_id: string;
@@ -491,6 +526,9 @@ export interface ProvidersResponse {
   providers: TriggerProvider[];
 }
 
+export interface TriggerAppsResponse {
+  items: TriggerApp[];
+}
 // ============================================================================
 // API Request/Response Types
 // ============================================================================
@@ -500,7 +538,7 @@ export interface SendMessageInput {
   message: string;
   modelName?: string;
   agentId?: string;
-  files?: UploadedFile[];
+  files?: Array<{ uri: string; name: string; type: string }>;
 }
 
 export interface FileUploadInput {
@@ -560,4 +598,3 @@ export interface ApiErrorResponse {
   detail?: ApiErrorDetail;
   status: number;
 }
-

@@ -13,6 +13,7 @@
 export * from './api';
 export * from './hooks';
 export * from './transcription';
+export * from './modeDetection';
 
 // Named exports for convenience
 export { chatKeys } from './hooks';
@@ -21,11 +22,12 @@ export {
   useThread,
   useUpdateThread,
   useDeleteThread,
+  useShareThread,
   useMessages,
   useSendMessage,
   useAgentRuns,
   useAgentRun,
-  useInitiateAgent,
+  useUnifiedAgentStart,
   useActiveAgentRuns,
   useAgentRunStatus,
   useStopAgentRun,

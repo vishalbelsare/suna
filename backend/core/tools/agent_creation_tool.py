@@ -13,7 +13,349 @@ from core.utils.config import config
     icon="Bot",
     color="bg-purple-100 dark:bg-purple-800/50",
     weight=190,
-    visible=True
+    visible=True,
+    usage_guide="""
+## ADDITIONAL CAPABILITY: SELF-CONFIGURATION AND AGENT BUILDING
+
+You now have special tools available that allow you to modify and configure yourself, as well as help users create and enhance AI agents. These capabilities are available to all agents and in addition to your core expertise and personality.
+
+## SYSTEM INFORMATION
+- BASE ENVIRONMENT: Python 3.11 with Debian Linux (slim)
+
+## 🎯 What You Can Help Users Build
+
+### 🤖 **Smart Assistants**
+- **Research Agents**: Gather information, analyze trends, create comprehensive reports
+- **Content Creators**: Write blogs, social media posts, marketing copy
+- **Code Assistants**: Review code, debug issues, suggest improvements
+- **Data Analysts**: Process spreadsheets, generate insights, create visualizations
+  - 🚨 CRITICAL: Always use real data from user-provided sources or verified APIs
+  - NEVER generate sample/demo data unless explicitly requested
+  - Prioritize accuracy and truth-seeking in all data analysis
+
+### 🔧 **Automation Powerhouses**
+- **Scheduled Tasks**: Daily reports, weekly summaries, maintenance routines
+- **Integration Bridges**: Connect different tools and services seamlessly
+- **Event-Driven Automation**: Respond to triggers from external services
+- **Monitoring Agents**: Track systems, send alerts, maintain health checks
+
+### 🌐 **Connected Specialists**
+- **API Integrators**: Work with Gmail, GitHub, Notion, databases, and 2700+ other tools
+- **Web Researchers**: Browse websites, scrape data, monitor changes
+- **File Managers**: Organize documents, process uploads, backup systems
+- **Communication Hubs**: Send emails, post updates, manage notifications
+
+## 🛠️ Your Self-Configuration Toolkit
+
+### Agent Configuration (`update_agent` tool)
+You can modify your own identity and capabilities:
+- **Personality & Expertise**: Update your system prompt, name, and description
+- **Tool Selection**: Enable/disable capabilities like web search, file management, code execution
+- **External Integrations**: Connect to thousands of external services via MCP servers
+- **IMPORTANT**: When adding new MCP servers, they are automatically merged with existing ones - all previously configured integrations are preserved
+
+### 🤖 Agent Creation (`create_new_agent` tool)
+Create completely new AI agents for specialized tasks:
+- **CRITICAL**: Always ask user for explicit permission before creating any agent using the `ask` tool
+- **Specialized Agents**: Build agents optimized for specific domains (research, coding, marketing, etc.)
+- **Custom Configuration**: Define unique personalities, expertise, and tool access for each agent
+- **NEVER**: Create agents without clear user confirmation and approval
+
+### 🔌 MCP Server Discovery & Integration
+Connect to external services:
+- **`search_mcp_servers`**: Find integrations by keyword (Gmail, Slack, databases, etc.)
+- **`get_popular_mcp_servers`**: Browse trending, well-tested integrations
+- **`get_mcp_server_tools`**: Explore what each integration can do
+- **`test_mcp_server_connection`**: Verify everything works perfectly
+
+### 🔐 Credential Profile Management
+Securely connect external accounts:
+- **`get_credential_profiles`**: See what's already connected
+- **`create_credential_profile`**: Set up new service connections (includes connection link)
+- **`configure_profile_for_agent`**: Add connected services to agents
+
+### ⏰ Trigger Management
+Schedule automatic execution and event-based triggers:
+- **`create_scheduled_trigger`**: Set up cron-based scheduling
+- **`get_scheduled_triggers`**: View all scheduled tasks
+- **`delete_scheduled_trigger`**: Remove scheduled tasks
+- **`toggle_scheduled_trigger`**: Enable/disable scheduled execution
+
+Event/APP-based triggers (Composio):
+- **`list_event_trigger_apps`**: Discover apps with available event triggers
+- **`list_app_event_triggers`**: List triggers for a specific app (includes config schema)
+- **`get_credential_profiles`**: List connected profiles to get `profile_id` and `connected_account_id`
+- **`create_event_trigger`**: Create an event trigger by passing `slug`, `profile_id`, `connected_account_id`, `trigger_config`, and `agent_prompt`.
+
+### 📊 Agent Management
+- **`get_current_agent_config`**: Review current setup and capabilities
+
+## 🎯 **Tool Mapping Guide - Match User Needs to Required Tools**
+
+### 🔧 **AgentPress Core Tools**
+- **`sb_shell_tool`**: Execute commands, run scripts, system operations, development tasks
+- **`sb_files_tool`**: Create/edit files, manage documents, process text, generate reports
+- **`browser_tool`**: Navigate websites, scrape content, interact with web apps, monitor pages
+- **`sb_vision_tool`**: Process images, analyze screenshots, extract text from images
+- **`sb_expose_tool`**: Expose local services, create public URLs for testing
+- **`web_search_tool`**: Search internet, gather information, research topics
+- **`sb_presentation_tool`**: Generate professional HTML presentations with beautiful slide designs
+- **`sb_git_sync`**: Sync files and projects with Git repositories for version control and collaboration
+
+### 🎯 **Common Use Case → Tool Mapping**
+
+**📊 Data Analysis & Reports**
+- Required: `sb_files_tool`
+- Optional: `web_search_tool`, `sb_vision_tool` (for charts)
+- Integrations: Google Sheets, databases, analytics platforms
+- 🚨 CRITICAL: Always use real data - fetch from user sources, APIs, or data providers
+- NEVER create sample data unless user explicitly requests "sample data" or "demo data"
+
+**🔍 Research & Information Gathering**
+- Required: `web_search_tool`, `sb_files_tool`, `browser_tool`
+- Optional: `sb_vision_tool` (for image analysis)
+- Integrations: Academic databases, news APIs, note-taking tools
+
+**📧 Communication & Notifications**
+- Required: (MCP integrations for communication)
+- Optional: `sb_files_tool` (attachments)
+- Integrations: Gmail, Slack, Teams, Discord, SMS services
+
+**💻 Development & Code Tasks**
+- Required: `sb_shell_tool`, `sb_files_tool`
+- Optional: `sb_expose_tool`, `web_search_tool`
+- Integrations: GitHub, GitLab, CI/CD platforms
+
+**🌐 Web Monitoring & Automation**
+- Required: `browser_tool`, `web_search_tool`
+- Optional: `sb_files_tool`
+- Integrations: Website monitoring services, notification platforms
+
+**📁 File Management & Organization**
+- Required: `sb_files_tool`
+- Optional: `sb_vision_tool` (image processing), `web_search_tool`
+- Integrations: Cloud storage (Google Drive, Dropbox), file processors
+
+**🤖 Social Media & Content**
+- Required: `sb_files_tool`
+- Optional: `web_search_tool`, `sb_vision_tool`
+- Integrations: Twitter, LinkedIn, Instagram, content management systems
+
+**📈 Business Intelligence & Analytics**
+- Required: `sb_files_tool`
+- Optional: `web_search_tool`, `sb_vision_tool`
+- Integrations: Analytics platforms, databases, business tools
+
+**🎨 Presentations & Visual Content**
+- Required: `sb_presentation_tool`
+- Optional: `web_search_tool` (research), `sb_files_tool` (export)
+- Integrations: Image services (Unsplash), content sources
+
+### ⏰ **Scheduling Indicators**
+**Create Scheduled Triggers When:**
+- User mentions "daily", "weekly", "regularly", "automatically"
+- Time-based requirements ("every morning", "at 9 AM")
+- Monitoring or checking tasks
+- Report generation needs
+
+## 🎨 Agent Building Approach
+
+### 🌟 Start with Understanding
+When users want to configure capabilities or create agents:
+
+**Great Discovery Questions:**
+- "What's the most time-consuming task in your daily work that you'd love to automate?"
+- "If you had a personal assistant who never slept, what would you want them to handle?"
+- "What repetitive tasks do you find yourself doing weekly that could be systematized?"
+- "Are there any external tools or services you use that you'd like your agent to connect with?"
+- "Do you have any multi-step processes that need automation?"
+
+### 🧠 **CRITICAL: Analyze & Recommend Tools**
+When a user describes what they want their agent to do, immediately analyze their needs and proactively recommend the specific tools and integrations required. Don't wait for them to ask - be the expert who knows what's needed!
+
+**Your Analysis Process:**
+1. **Parse the Request**: Break down what the user wants to accomplish
+2. **Identify Required Capabilities**: What core functions are needed?
+3. **Map to AgentPress Tools**: Which built-in tools are required?
+4. **Suggest MCP Integrations**: What external services would be helpful?
+5. **Recommend Automation**: Would scheduled triggers improve the outcome?
+6. **Consider Scheduling**: Would automation/triggers be beneficial?
+
+**Example Analysis:**
+*User says: "I want an agent that monitors my GitHub repos and sends me Slack notifications when there are new issues or PRs"*
+
+**Your Response Should Include:**
+- **AgentPress Tools Needed**: `web_search_tool` (for monitoring)
+- **MCP Integrations Required**: GitHub integration, Slack integration  
+- **Automation Process**: Check GitHub → analyze changes → format message → send to Slack
+- **Scheduling Suggestion**: Scheduled trigger to run every 15-30 minutes
+- **Next Steps**: "Let me search for the best GitHub and Slack integrations and set this up for you!"
+
+### 🔍 Understanding Their World
+**Context-Gathering Questions:**
+- "What's your role/industry? (This helps me suggest relevant tools and integrations)"
+- "How technical are you? (Should I explain things step-by-step or keep it high-level?)"
+- "What tools do you currently use for this work? (Gmail, Slack, Notion, GitHub, etc.)"
+- "How often would you want this to run? (Daily, weekly, when triggered by events?)"
+- "What would success look like for this agent?"
+
+### 🚀 Building Process
+
+**My Approach:**
+1. **Listen & Understand**: Ask thoughtful questions to really get their needs
+2. **Explore Current Setup**: Check what's already configured
+3. **Research Best Options**: Find the top 5 most suitable integrations for their use case
+4. **Design Thoughtfully**: Recommend tools, automation, and schedules that fit perfectly
+5. **Build & Test**: Create everything and verify it works as expected
+6. **Guide & Support**: Walk them through how to use and modify their setup
+
+## 💡 Configuration Examples
+
+### 🎯 **"I want to automate my daily tasks"**
+Perfect! Let me help you build task automation capabilities.
+
+**My Analysis:**
+- **Tools Needed**: `sb_files_tool` (file management), `web_search_tool` (research)
+- **Likely Integrations**: Email (Gmail/Outlook), project management (Notion/Asana), communication (Slack/Teams)
+- **Automation**: Multi-step processes with triggers
+- **Scheduling**: Daily/weekly triggers based on your routine
+
+**Next Steps**: I'll ask about your specific needs, then search for the best integrations and set everything up!
+
+### 🔍 **"I need a research assistant"**
+Excellent choice! Let me enhance your capabilities for comprehensive research.
+
+**My Analysis:**
+- **Core Tools**: `web_search_tool` (internet research), `sb_files_tool` (document creation), `browser_tool` (website analysis)
+- **Recommended Integrations**: Academic databases, news APIs, note-taking tools (Notion/Obsidian)
+- **Process**: Research → Analysis → Report Generation → Storage
+- **Scheduling**: Optional triggers for regular research updates
+
+**Next Steps**: I'll set up web search capabilities and find research-focused integrations for you!
+
+### 📧 **"I want to connect to Gmail and Slack"**
+Great idea! Communication integration is powerful.
+
+**My Analysis:**
+- **Tools Needed**: potentially `sb_files_tool` (attachments)
+- **Required Integrations**: Gmail MCP server, Slack MCP server
+- **Process**: Email monitoring → Processing → Slack notifications/responses
+- **Scheduling**: Real-time triggers or periodic checking
+
+**Next Steps**: I'll search for the best Gmail and Slack integrations and set up credential profiles!
+
+### 📊 **"I need daily reports generated automatically"**
+Love it! Automated reporting is a game-changer.
+
+**My Analysis:**
+- **Core Tools**: `sb_files_tool` (report creation), `web_search_tool` (additional data)
+- **Likely Integrations**: Analytics platforms, databases, spreadsheet tools (Google Sheets/Excel)
+- **Process**: Data Collection → Analysis → Report Generation → Distribution
+- **Scheduling**: Daily scheduled trigger at your preferred time
+
+**Next Steps**: I'll create a scheduled trigger and find the right data source integrations!
+
+## 🔗 **CRITICAL: Credential Profile Creation & Tool Selection Flow**
+
+When working with external integrations, you MUST follow this EXACT step-by-step process:
+
+### **Step 1: Check Existing Profiles First** 🔍
+First check if there are existing profiles by calling `get_credential_profiles` with the toolkit_slug if known.
+
+**Then ask the user:**
+"I can see you have the following existing profiles:
+[List existing profiles]
+
+Would you like to:
+1. **Use an existing profile** - I can configure one of these for your agent
+2. **Create a new profile** - Set up a fresh connection for this service
+
+Which would you prefer?"
+
+### **Step 2: Search for App (if creating new)** 🔍
+Call `search_mcp_servers` with the user's app name and limit=5 to find the correct app details.
+
+### **Step 3: Create Credential Profile (if creating new)** 📋
+Call `create_credential_profile` using the exact `app_slug` from search results and a descriptive `profile_name`.
+
+### **Step 4: MANDATORY - User Must Connect Account** ⏳
+"🔗 **IMPORTANT: Please Connect Your Account**
+
+The credential profile has been created successfully! I can see from the response that you need to connect your account:
+
+**Connection Link:** [connection_link from create_credential_profile response]
+
+1. **Click the connection link above** to connect your [app_name] account
+2. **Complete the authorization process** in your browser  
+3. **Return here when done** and let me know you've connected successfully
+
+⚠️ **I need to wait for you to connect before proceeding** - this is required so I can check what tools are available and help you select the right ones for your agent.
+
+**Please reply with 'connected' or 'done' when you've completed the connection process.**"
+
+### **Step 5: MANDATORY - Tool Selection** ⚙️
+"Excellent! Your [app_name] account is connected. I can see the following tools are available:
+
+[List each available tool with descriptions from discover_user_mcp_servers response]
+
+**Which tools would you like to enable for your agent?** 
+- **Tool 1**: [description of what it does]
+- **Tool 2**: [description of what it does]  
+- **Tool 3**: [description of what it does]
+
+Please let me know which specific tools you'd like to use, and I'll configure them for your agent. You can select multiple tools or all of them."
+
+### **Step 6: Configure Profile for Agent** ✅
+Call `configure_profile_for_agent` with the `profile_id` and array of selected tool names.
+
+### 🚨 **CRITICAL REMINDERS FOR CREDENTIAL PROFILES**
+- **ALWAYS check existing profiles first** - ask users if they want to use existing or create new
+- **CONNECTION LINK is included in create response** - no separate connection step needed
+- **NEVER skip the user connection step** - always wait for confirmation
+- **NEVER skip tool selection** - always ask user to choose specific tools
+- **NEVER assume tools** - only use tools returned from `discover_user_mcp_servers`
+- **NEVER proceed without confirmation** - wait for user to confirm each step
+- **ALWAYS explain what each tool does** - help users make informed choices
+- **ALWAYS use exact tool names** - character-perfect matches only
+
+## ⚠️ CRITICAL SYSTEM REQUIREMENTS
+
+### 🚨 **ABSOLUTE REQUIREMENTS - VIOLATION WILL CAUSE SYSTEM FAILURE**
+
+1. **MCP SERVER SEARCH LIMIT**: NEVER search for more than 5 MCP servers. Always use `limit=5` parameter.
+2. **EXACT NAME ACCURACY**: Tool names and MCP server names MUST be character-perfect matches. Even minor spelling errors will cause complete system failure.
+3. **NO FABRICATED NAMES**: NEVER invent, assume, or guess MCP server names or tool names. Only use names explicitly returned from tool calls.
+4. **MANDATORY VERIFICATION**: Before configuring any MCP server, MUST first verify its existence through `search_mcp_servers_for_agent` or `get_popular_mcp_servers`.
+5. **CHECK EXISTING PROFILES FIRST**: Before creating ANY credential profile, MUST first call `get_credential_profiles` to check existing profiles and ask user if they want to create new or use existing.
+6. **APP SEARCH BEFORE CREDENTIAL PROFILE**: Before creating ANY new credential profile, MUST first use `search_mcp_servers_for_agent` to find the correct app and get its exact `toolkit_slug`.
+7. **MANDATORY USER CONNECTION**: After creating credential profile, the connection link is provided in the response. MUST ask user to connect their account and WAIT for confirmation before proceeding. Do NOT continue until user confirms connection.
+8. **TOOL SELECTION REQUIREMENT**: After user connects credential profile, MUST call `discover_user_mcp_servers` to get available tools, then ask user to select which specific tools to enable. This is CRITICAL - never skip tool selection.
+9. **TOOL VALIDATION**: Before configuring complex automations, MUST first call `get_current_agent_config` to verify which tools are available.
+10. **DATA INTEGRITY**: Only use actual data returned from function calls. Never supplement with assumed information.
+
+### 📋 **Standard Best Practices**
+
+11. **ANALYZE FIRST, ASK SECOND**: When user describes their needs, immediately analyze what tools/integrations are required before asking follow-up questions
+12. **BE THE EXPERT**: Proactively recommend specific tools and integrations based on their use case - don't wait for them to figure it out
+13. **RESPECT USER PREFERENCES**: If users don't want external integrations, don't add MCP servers
+14. **ALWAYS ASK ABOUT INTEGRATIONS**: During discovery, ask about external service connections with examples
+15. **ALWAYS ASK ABOUT AUTOMATION**: Ask about scheduled, repeatable processes during discovery
+16. **RANK BY POPULARITY**: When presenting MCP options, prioritize higher usage counts
+17. **EXPLAIN REASONING**: Help users understand why you're making specific recommendations - explain the "why" behind each tool/integration
+18. **START SIMPLE**: Begin with core functionality, then add advanced features
+19. **BE PROACTIVE**: Suggest improvements and optimizations based on their use case
+
+## 💡 How to Use These Capabilities
+
+When users ask about:
+- **"Configure yourself"** or **"Add tools"** → Use your agent configuration capabilities
+- **"Connect to [service]"** → Help them set up MCP integrations and credential profiles
+- **"Automate [process]"** → Create triggers and scheduled automation
+- **"Schedule [task]"** → Set up scheduled triggers
+- **"Build an agent"** → Guide them through the full agent building process
+
+**Remember**: You maintain your core personality and expertise while offering these additional configuration and building capabilities. Help users enhance both your capabilities and create new agents as needed!
+"""
 )
 class AgentCreationTool(Tool):
     def __init__(self, thread_manager: ThreadManager, db_connection, account_id: str):
@@ -58,7 +400,7 @@ class AgentCreationTool(Tool):
                     },
                     "agentpress_tools": {
                         "type": "object",
-                        "description": "Configuration for AgentPress tools. Each key is a tool name, value is boolean for enabled/disabled. Available tools: sb_shell_tool, sb_files_tool, web_search_tool, browser_tool, sb_vision_tool, data_providers_tool, etc.",
+                        "description": "Configuration for AgentPress tools. Each key is a tool name, value is boolean for enabled/disabled. Available tools: sb_shell_tool, sb_files_tool, web_search_tool, browser_tool, sb_vision_tool, etc.",
                         "additionalProperties": {
                             "type": "boolean"
                         }
@@ -109,8 +451,8 @@ class AgentCreationTool(Tool):
             client = await self.db.client
             
             
-            from core.core_utils import check_agent_count_limit
-            limit_check = await check_agent_count_limit(client, account_id)
+            from core.utils.limits_checker import check_agent_count_limit
+            limit_check = await check_agent_count_limit(account_id)
             
             if not limit_check['can_create']:
                 return self.fail_response(
@@ -120,7 +462,7 @@ class AgentCreationTool(Tool):
                 )
 
             if agentpress_tools is None:
-                from core.config_helper import _get_default_agentpress_tools
+                from core.config.config_helper import _get_default_agentpress_tools
                 agentpress_tools = _get_default_agentpress_tools()
             else:
                 agent_builder_tools = {
@@ -202,7 +544,9 @@ class AgentCreationTool(Tool):
                     "message": success_message,
                     "agent_id": agent_id,
                     "agent_name": name,
-                    "is_default": is_default
+                    "name": name,  # Also include 'name' for frontend compatibility
+                    "is_default": is_default,
+                    "success": True  # Explicit success flag for frontend parsing
                 })
                 
             except Exception as e:
@@ -221,7 +565,7 @@ class AgentCreationTool(Tool):
         "type": "function",
         "function": {
             "name": "search_mcp_servers_for_agent",
-            "description": "Search for available MCP servers/integrations that can be added to a newly created agent. Use this to find integrations for services like Gmail, Slack, GitHub, etc.",
+            "description": "Search MCP integrations and return exact toolkit slugs for agent setup. This must be the first tool call before any create_credential_profile_for_agent call.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -346,13 +690,13 @@ class AgentCreationTool(Tool):
         "type": "function",
         "function": {
             "name": "create_credential_profile_for_agent",
-            "description": "Create a credential profile for external service integration with a newly created agent. This generates an authentication link that the user must complete.",
+            "description": "Create a credential profile for external service integration with a newly created agent. Call this ONLY after search_mcp_servers_for_agent in the same request flow, even if the slug seems obvious. Pass an exact toolkit_slug from search results and never generic values like 'google'.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "toolkit_slug": {
                         "type": "string",
-                        "description": "The toolkit/app slug (e.g., 'github', 'gmail', 'slack', 'linear')"
+                        "description": "Exact toolkit slug from search results (e.g., 'gmail', 'googlecalendar', 'googledrive', 'github', 'linear'). Do not use generic names like 'google'."
                     },
                     "profile_name": {
                         "type": "string",
@@ -374,10 +718,10 @@ class AgentCreationTool(Tool):
                 return self.fail_response("Unable to determine current account ID")
             
             from core.composio_integration.composio_service import get_integration_service
+            integration_service = get_integration_service(db_connection=self.db)
             
             integration_user_id = str(uuid4())
 
-            integration_service = get_integration_service(db_connection=self.db)
             result = await integration_service.integrate_toolkit(
                 toolkit_slug=toolkit_slug,
                 account_id=account_id,
@@ -418,8 +762,8 @@ class AgentCreationTool(Tool):
             })
             
         except Exception as e:
-            logger.error(f"Failed to create credential profile: {e}")
-            return self.fail_response("Failed to create credential profile")
+            logger.error(f"Failed to create credential profile for '{toolkit_slug}': {e}", exc_info=True)
+            return self.fail_response(f"Failed to create credential profile: {str(e)}")
 
     @openapi_schema({
         "type": "function",
@@ -520,7 +864,7 @@ class AgentCreationTool(Tool):
                 "properties": {
                     "agent_id": {
                         "type": "string",
-                        "description": "The ID of the agent to add the integration to"
+                        "description": "Optional. Agent ID to add the integration to. Use 'default' (or omit) to target the account's default agent."
                     },
                     "profile_name": {
                         "type": "string",
@@ -536,33 +880,42 @@ class AgentCreationTool(Tool):
                         "description": "Optional custom display name for this integration"
                     }
                 },
-                "required": ["agent_id", "profile_name", "enabled_tools"]
+                "required": ["profile_name", "enabled_tools"]
             }
         }
     })
     async def configure_agent_integration(
         self,
-        agent_id: str,
         profile_name: str,
         enabled_tools: List[str],
+        agent_id: Optional[str] = "default",
         display_name: Optional[str] = None
     ) -> ToolResult:
         try:
             account_id = self.account_id
             if not account_id:
                 return self.fail_response("Unable to determine current account ID")
+
+            requested_agent_id = (agent_id.strip() or "default") if isinstance(agent_id, str) else "default"
+            actual_agent_id = requested_agent_id
+            if requested_agent_id == "default":
+                from core.agents import repo as agents_repo
+                actual_agent_id = await agents_repo.get_default_agent_id(account_id)
+                if not actual_agent_id:
+                    return self.fail_response("No default agent found for this account")
+                logger.debug(f"Resolved 'default' agent_id to: {actual_agent_id}")
             
             client = await self.db.client
             
-            agent_result = await client.table('agents').select('*').eq('agent_id', agent_id).eq('account_id', account_id).execute()
+            agent_result = await client.table('agents').select('*').eq('agent_id', actual_agent_id).eq('account_id', account_id).execute()
             if not agent_result.data:
-                return self.fail_response("Agent not found or access denied")
+                return self.fail_response("Worker not found or access denied")
             
             agent_data = agent_result.data[0]
             current_version_id = agent_data.get('current_version_id')
             
             if not current_version_id:
-                return self.fail_response("Agent has no current version configured")
+                return self.fail_response("Worker has no current version configured")
             
             from core.composio_integration.composio_profile_service import ComposioProfileService
             profile_service = ComposioProfileService(self.db)
@@ -592,7 +945,7 @@ class AgentCreationTool(Tool):
                 .execute()
             
             if not version_result.data or not version_result.data.get('config'):
-                return self.fail_response("Agent version configuration not found")
+                return self.fail_response("Worker version configuration not found")
             
             current_config = version_result.data['config']
             current_tools = current_config.get('tools', {})
@@ -600,7 +953,7 @@ class AgentCreationTool(Tool):
             
             new_mcp_config = {
                 'name': profile.toolkit_name,
-                'type': 'composio',
+                'customType': 'composio',
                 'config': {
                     'profile_id': profile.profile_id,
                     'toolkit_slug': profile.toolkit_slug,
@@ -621,7 +974,7 @@ class AgentCreationTool(Tool):
             version_service = await get_version_service()
             
             new_version = await version_service.create_version(
-                agent_id=agent_id,
+                agent_id=actual_agent_id,
                 user_id=account_id,
                 system_prompt=current_config.get('system_prompt', ''),
                 model=current_config.get('model'),
@@ -634,7 +987,7 @@ class AgentCreationTool(Tool):
             await client.table('agents').update({
                 'current_version_id': new_version.version_id,
                 'version_count': agent_data['version_count'] + 1
-            }).eq('agent_id', agent_id).execute()
+            }).eq('agent_id', actual_agent_id).execute()
             
             try:
                 from core.tools.mcp_tool_wrapper import MCPToolWrapper
@@ -653,9 +1006,11 @@ class AgentCreationTool(Tool):
                     'customType': 'composio'
                 }
                 
-                mcp_wrapper_instance = MCPToolWrapper(mcp_configs=[mcp_config_for_wrapper])
+                mcp_wrapper_instance = MCPToolWrapper(
+                    mcp_configs=[mcp_config_for_wrapper],
+                    account_id=account_id,
+                )
                 await mcp_wrapper_instance.initialize_and_register_tools()
-                logger.debug(f"Successfully registered MCP tools dynamically for {profile.toolkit_name}")
                 
             except Exception as e:
                 logger.warning(f"Could not dynamically register MCP tools in current runtime: {str(e)}. Tools will be available on next agent run.")
@@ -673,7 +1028,7 @@ class AgentCreationTool(Tool):
             
             return self.success_response({
                 "message": success_message,
-                "agent_id": agent_id,
+                "agent_id": actual_agent_id,
                 "profile_name": profile_name,
                 "integration_name": profile.toolkit_name,
                 "enabled_tools": enabled_tools,
@@ -711,6 +1066,10 @@ class AgentCreationTool(Tool):
                     "agent_prompt": {
                         "type": "string",
                         "description": "Prompt to send to the agent when triggered"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model to use for scheduled runs. Defaults to 'kortix/basic'."
                     }
                 },
                 "required": ["agent_id", "name", "cron_expression", "agent_prompt"]
@@ -723,7 +1082,8 @@ class AgentCreationTool(Tool):
         name: str,
         cron_expression: str,
         agent_prompt: str,
-        description: Optional[str] = None
+        description: Optional[str] = None,
+        model: Optional[str] = None
     ) -> ToolResult:
         try:
             account_id = self.account_id
@@ -734,15 +1094,18 @@ class AgentCreationTool(Tool):
             
             agent_result = await client.table('agents').select('*').eq('agent_id', agent_id).eq('account_id', account_id).execute()
             if not agent_result.data:
-                return self.fail_response("Agent not found or access denied")
+                return self.fail_response("Worker not found or access denied")
             
             if not agent_prompt:
                 return self.fail_response("agent_prompt is required")
             
+            selected_model = model or "kortix/basic"
+
             trigger_config = {
                 "cron_expression": cron_expression,
                 "provider_id": "schedule",
-                "agent_prompt": agent_prompt
+                "agent_prompt": agent_prompt,
+                "model": selected_model
             }
             
             from core.triggers import get_trigger_service
@@ -761,7 +1124,8 @@ class AgentCreationTool(Tool):
                 success_message += f"**Trigger Details:**\n"
                 success_message += f"- Name: {name}\n"
                 success_message += f"- Schedule: `{cron_expression}`\n"
-                success_message += f"- Type: Agent execution\n"
+                success_message += f"- Model: {selected_model}\n"
+                success_message += f"- Type: Worker execution\n"
                 success_message += f"- Prompt: {agent_prompt[:50]}{'...' if len(agent_prompt) > 50 else ''}\n"
                 success_message += f"- Status: **Active**\n\n"
                 success_message += f"The trigger is now active and will run according to the schedule."
@@ -774,6 +1138,7 @@ class AgentCreationTool(Tool):
                         "name": trigger.name,
                         "description": trigger.description,
                         "cron_expression": cron_expression,
+                        "model": selected_model,
                         "is_active": trigger.is_active,
                         "created_at": trigger.created_at.isoformat()
                     }
@@ -815,7 +1180,7 @@ class AgentCreationTool(Tool):
             
             agent_result = await client.table('agents').select('*').eq('agent_id', agent_id).eq('account_id', account_id).execute()
             if not agent_result.data:
-                return self.fail_response("Agent not found or access denied")
+                return self.fail_response("Worker not found or access denied")
             
             from core.triggers import get_trigger_service, TriggerType
             trigger_svc = get_trigger_service(self.db)
@@ -826,7 +1191,7 @@ class AgentCreationTool(Tool):
             
             if not schedule_triggers:
                 return self.success_response({
-                    "message": "No scheduled triggers found for this agent.",
+                    "message": "No scheduled triggers found for this worker.",
                     "agent_id": agent_id,
                     "triggers": [],
                     "total_count": 0
@@ -893,7 +1258,7 @@ class AgentCreationTool(Tool):
             
             agent_result = await client.table('agents').select('*').eq('agent_id', agent_id).eq('account_id', account_id).execute()
             if not agent_result.data:
-                return self.fail_response("Agent not found or access denied")
+                return self.fail_response("Worker not found or access denied")
             
             from core.triggers import get_trigger_service
             trigger_svc = get_trigger_service(self.db)
@@ -973,7 +1338,7 @@ class AgentCreationTool(Tool):
             
             agent_result = await client.table('agents').select('*').eq('agent_id', agent_id).eq('account_id', account_id).execute()
             if not agent_result.data:
-                return self.fail_response("Agent not found or access denied")
+                return self.fail_response("Worker not found or access denied")
             
             from core.triggers import get_trigger_service
             trigger_svc = get_trigger_service(self.db)
@@ -1088,13 +1453,13 @@ class AgentCreationTool(Tool):
             
             agent_result = await client.table('agents').select('*').eq('agent_id', agent_id).eq('account_id', account_id).execute()
             if not agent_result.data:
-                return self.fail_response("Agent not found or access denied")
+                return self.fail_response("Worker not found or access denied")
             
             agent_data = agent_result.data[0]
             current_version_id = agent_data.get('current_version_id')
             
             if not current_version_id:
-                return self.fail_response("Agent has no current version configured")
+                return self.fail_response("Worker has no current version configured")
             
             version_result = await client.table('agent_versions').select('config').eq('version_id', current_version_id).single().execute()
             if not version_result.data:

@@ -1,10 +1,11 @@
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, BackgroundTasks
 from pydantic import BaseModel, Field, validator
 from core.utils.auth_utils import verify_and_get_user_id_from_jwt, require_agent_access, AuthorizedAgentAccess
 from core.services.supabase import DBConnection
 from .file_processor import FileProcessor
 from core.utils.logger import logger
+from core.utils.config import config
 from .validation import FileNameValidator, ValidationError, validate_folder_name_unique, validate_file_name_unique_in_folder
 
 # Constants
@@ -97,6 +98,9 @@ file_processor = FileProcessor()
 @router.get("/folders", response_model=List[FolderResponse])
 async def get_folders(user_id: str = Depends(verify_and_get_user_id_from_jwt)):
     """Get all knowledge base folders for user."""
+    if not config.ENABLE_KNOWLEDGE_BASE:
+        return []
+    
     try:
         client = await db.client
         account_id = user_id
@@ -132,6 +136,9 @@ async def create_folder(
     user_id: str = Depends(verify_and_get_user_id_from_jwt)
 ):
     """Create a new knowledge base folder."""
+    if not config.ENABLE_KNOWLEDGE_BASE:
+        raise HTTPException(status_code=503, detail="Knowledge base feature is currently disabled")
+    
     try:
         client = await db.client
         account_id = user_id
@@ -179,6 +186,9 @@ async def update_folder(
     user_id: str = Depends(verify_and_get_user_id_from_jwt)
 ):
     """Update a knowledge base folder."""
+    if not config.ENABLE_KNOWLEDGE_BASE:
+        raise HTTPException(status_code=503, detail="Knowledge base feature is currently disabled")
+    
     try:
         client = await db.client
         account_id = user_id
@@ -253,12 +263,13 @@ async def delete_folder(
     folder_id: str,
     user_id: str = Depends(verify_and_get_user_id_from_jwt)
 ):
-    """Delete a knowledge base folder and all its entries."""
+    if not config.ENABLE_KNOWLEDGE_BASE:
+        raise HTTPException(status_code=503, detail="Knowledge base feature is currently disabled")
+    
     try:
         client = await db.client
         account_id = user_id
         
-        # Verify ownership
         folder_result = await client.table('knowledge_base_folders').select(
             'folder_id'
         ).eq('folder_id', folder_id).eq('account_id', account_id).execute()
@@ -266,12 +277,20 @@ async def delete_folder(
         if not folder_result.data:
             raise HTTPException(status_code=404, detail="Folder not found")
         
-        # Get all entries in the folder to delete their files from S3
         entries_result = await client.table('knowledge_base_entries').select(
             'entry_id, file_path'
         ).eq('folder_id', folder_id).execute()
         
-        # Delete all files from S3 storage
+        entry_ids = [e['entry_id'] for e in (entries_result.data or [])]
+        agent_ids_to_invalidate = set()
+        if entry_ids:
+            assignments_result = await client.table('agent_knowledge_entry_assignments').select(
+                'agent_id'
+            ).in_('entry_id', entry_ids).execute()
+            agent_ids_to_invalidate = set(
+                row['agent_id'] for row in (assignments_result.data or [])
+            )
+        
         if entries_result.data:
             file_paths = [entry['file_path'] for entry in entries_result.data]
             try:
@@ -280,8 +299,16 @@ async def delete_folder(
             except Exception as e:
                 logger.warning(f"Failed to delete some files from S3: {str(e)}")
         
-        # Delete folder (cascade will handle entries and assignments in DB)
         await client.table('knowledge_base_folders').delete().eq('folder_id', folder_id).execute()
+        
+        try:
+            from core.cache.runtime_cache import invalidate_kb_context_cache
+            for agent_id in agent_ids_to_invalidate:
+                await invalidate_kb_context_cache(agent_id)
+            if agent_ids_to_invalidate:
+                logger.debug(f"🗑️ Invalidated KB cache for {len(agent_ids_to_invalidate)} agents after folder deletion")
+        except Exception as e:
+            logger.warning(f"Failed to invalidate KB cache after folder deletion: {e}")
         
         return {"success": True}
         
@@ -295,18 +322,28 @@ async def delete_folder(
 @router.post("/folders/{folder_id}/upload")
 async def upload_file(
     folder_id: str,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     user_id: str = Depends(verify_and_get_user_id_from_jwt)
 ):
     """Upload a file to a knowledge base folder."""
+    if not config.ENABLE_KNOWLEDGE_BASE:
+        raise HTTPException(status_code=503, detail="Knowledge base feature is currently disabled")
+    
+    import time
+    start_time = time.time()
+    logger.info(f"[UPLOAD] Starting upload for file: {file.filename}")
+    
     try:
         client = await db.client
         account_id = user_id
         
         # Verify folder ownership
+        t1 = time.time()
         folder_result = await client.table('knowledge_base_folders').select(
             'folder_id'
         ).eq('folder_id', folder_id).eq('account_id', account_id).execute()
+        logger.info(f"[UPLOAD] Folder verification took: {time.time() - t1:.2f}s")
         
         if not folder_result.data:
             raise HTTPException(status_code=404, detail="Folder not found")
@@ -315,27 +352,38 @@ async def upload_file(
         if not file.filename:
             raise ValidationError("Filename is required")
         
+        t2 = time.time()
         is_valid, error_message = FileNameValidator.validate_name(file.filename, "file")
         if not is_valid:
             raise ValidationError(error_message)
+        logger.info(f"[UPLOAD] Filename validation took: {time.time() - t2:.2f}s")
         
         # Read file content
+        t3 = time.time()
         file_content = await file.read()
+        logger.info(f"[UPLOAD] File read ({len(file_content)} bytes) took: {time.time() - t3:.2f}s")
         
         # Check total file size limit before processing
+        t4 = time.time()
         await check_total_file_size_limit(account_id, len(file_content))
+        logger.info(f"[UPLOAD] Size limit check took: {time.time() - t4:.2f}s")
         
         # Generate unique filename if there's a conflict
+        t5 = time.time()
         final_filename = await validate_file_name_unique_in_folder(file.filename, folder_id)
+        logger.info(f"[UPLOAD] Filename uniqueness check took: {time.time() - t5:.2f}s")
         
-        # Process file
-        result = await file_processor.process_file(
+        # Process file in background
+        t6 = time.time()
+        result = await file_processor.process_file_fast(
             account_id=account_id,
             folder_id=folder_id,
             file_content=file_content,
             filename=final_filename,
-            mime_type=file.content_type or 'application/octet-stream'
+            mime_type=file.content_type or 'application/octet-stream',
+            background_tasks=background_tasks
         )
+        logger.info(f"[UPLOAD] File processing took: {time.time() - t6:.2f}s")
         
         if not result['success']:
             raise HTTPException(status_code=400, detail=result['error'])
@@ -346,6 +394,7 @@ async def upload_file(
             result['original_filename'] = file.filename
             result['final_filename'] = final_filename
         
+        logger.info(f"[UPLOAD] Total upload time: {time.time() - start_time:.2f}s")
         return result
         
     except ValidationError:
@@ -363,6 +412,9 @@ async def get_folder_entries(
     user_id: str = Depends(verify_and_get_user_id_from_jwt)
 ):
     """Get all entries in a folder."""
+    if not config.ENABLE_KNOWLEDGE_BASE:
+        return []
+    
     try:
         client = await db.client
         account_id = user_id
@@ -402,6 +454,9 @@ async def delete_entry(
     user_id: str = Depends(verify_and_get_user_id_from_jwt)
 ):
     """Delete a knowledge base entry."""
+    if not config.ENABLE_KNOWLEDGE_BASE:
+        raise HTTPException(status_code=503, detail="Knowledge base feature is currently disabled")
+    
     try:
         client = await db.client
         account_id = user_id
@@ -425,6 +480,19 @@ async def delete_entry(
         # Delete from database
         await client.table('knowledge_base_entries').delete().eq('entry_id', entry_id).execute()
         
+        # Invalidate KB context cache for all agents that had this entry assigned
+        try:
+            from core.cache.runtime_cache import invalidate_kb_context_cache
+            assignments_result = await client.table('agent_knowledge_entry_assignments') \
+                .select('agent_id').eq('entry_id', entry_id).execute()
+            
+            agent_ids = set(row['agent_id'] for row in assignments_result.data) if assignments_result.data else set()
+            for agent_id in agent_ids:
+                await invalidate_kb_context_cache(agent_id)
+            logger.debug(f"🗑️ Invalidated KB cache for {len(agent_ids)} agents after entry deletion")
+        except Exception as e:
+            logger.warning(f"Failed to invalidate KB cache after entry deletion: {e}")
+        
         return {"success": True}
         
     except HTTPException:
@@ -440,6 +508,9 @@ async def update_entry(
     user_id: str = Depends(verify_and_get_user_id_from_jwt)
 ):
     """Update a knowledge base entry summary."""
+    if not config.ENABLE_KNOWLEDGE_BASE:
+        raise HTTPException(status_code=503, detail="Knowledge base feature is currently disabled")
+    
     try:
         client = await db.client
         account_id = user_id
@@ -459,6 +530,19 @@ async def update_entry(
         
         if not update_result.data:
             raise HTTPException(status_code=500, detail="Failed to update entry")
+        
+        # Invalidate KB context cache for all agents that have this entry assigned
+        try:
+            from core.cache.runtime_cache import invalidate_kb_context_cache
+            assignments_result = await client.table('agent_knowledge_entry_assignments') \
+                .select('agent_id').eq('entry_id', entry_id).execute()
+            
+            agent_ids = set(row['agent_id'] for row in assignments_result.data) if assignments_result.data else set()
+            for agent_id in agent_ids:
+                await invalidate_kb_context_cache(agent_id)
+            logger.debug(f"🗑️ Invalidated KB cache for {len(agent_ids)} agents after entry update")
+        except Exception as e:
+            logger.warning(f"Failed to invalidate KB cache after entry update: {e}")
         
         # Return the updated entry
         updated_entry = update_result.data[0]
@@ -483,6 +567,9 @@ async def get_agent_assignments(
     auth: AuthorizedAgentAccess = Depends(require_agent_access)
 ):
     """Get entry assignments for an agent."""
+    if not config.ENABLE_KNOWLEDGE_BASE:
+        return {}
+    
     try:
         client = await DBConnection().client
         
@@ -504,6 +591,9 @@ async def update_agent_assignments(
     auth: AuthorizedAgentAccess = Depends(require_agent_access)
 ):
     """Update agent entry assignments."""
+    if not config.ENABLE_KNOWLEDGE_BASE:
+        raise HTTPException(status_code=503, detail="Knowledge base feature is currently disabled")
+    
     try:
         client = await db.client
         account_id = auth.user_id
@@ -521,6 +611,15 @@ async def update_agent_assignments(
                 'enabled': True
             }).execute()
         
+        # Invalidate agent config cache and KB context cache (knowledge base assignments changed)
+        try:
+            from core.cache.runtime_cache import invalidate_agent_config_cache, invalidate_kb_context_cache
+            await invalidate_agent_config_cache(agent_id)
+            await invalidate_kb_context_cache(agent_id)
+            logger.debug(f"🗑️ Invalidated cache for agent {agent_id} after knowledge base update")
+        except Exception as e:
+            logger.warning(f"Failed to invalidate cache for agent {agent_id}: {e}")
+        
         return {"success": True, "message": "Assignments updated successfully"}
         
     except Exception as e:
@@ -530,6 +629,96 @@ async def update_agent_assignments(
 class FolderMoveRequest(BaseModel):
     folder_id: str
 
+
+# File download/read
+@router.get("/entries/{entry_id}/content")
+async def get_entry_content(
+    entry_id: str,
+    user_id: str = Depends(verify_and_get_user_id_from_jwt)
+):
+    """Get the actual content of a knowledge base file."""
+    if not config.ENABLE_KNOWLEDGE_BASE:
+        raise HTTPException(status_code=503, detail="Knowledge base feature is currently disabled")
+
+    try:
+        client = await db.client
+        account_id = user_id
+
+        # Get entry details
+        entry_result = await client.table('knowledge_base_entries').select(
+            'entry_id, filename, file_path, mime_type, file_size'
+        ).eq('entry_id', entry_id).eq('account_id', account_id).eq('is_active', True).execute()
+
+        if not entry_result.data:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        entry = entry_result.data[0]
+        file_path = entry['file_path']
+
+        # Download file from S3
+        try:
+            file_content = await client.storage.from_('file-uploads').download(file_path)
+            if not file_content:
+                raise HTTPException(status_code=404, detail="File content not found in storage")
+        except Exception as e:
+            logger.error(f"Error downloading file from S3: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to download file: {str(e)}")
+
+        # Try to decode as text
+        content_text = None
+        mime_type = entry['mime_type'] or 'application/octet-stream'
+
+        if mime_type.startswith('text/') or mime_type in ['application/json', 'application/xml']:
+            try:
+                import chardet
+                detected = chardet.detect(file_content)
+                encoding = detected.get('encoding', 'utf-8')
+                content_text = file_content.decode(encoding)
+            except:
+                content_text = file_content.decode('utf-8', errors='replace')
+        elif entry['filename'].endswith('.pdf'):
+            try:
+                import io
+                import PyPDF2
+                pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_content))
+                content_text = '\n\n'.join(page.extract_text() for page in pdf_reader.pages)
+            except Exception as e:
+                logger.warning(f"Failed to extract PDF text: {e}")
+        elif entry['filename'].endswith('.docx'):
+            try:
+                import io
+                import docx
+                doc = docx.Document(io.BytesIO(file_content))
+                content_text = '\n'.join(paragraph.text for paragraph in doc.paragraphs)
+            except Exception as e:
+                logger.warning(f"Failed to extract DOCX text: {e}")
+        else:
+            # Try generic text decode
+            try:
+                import chardet
+                detected = chardet.detect(file_content[:4096])
+                if detected.get('confidence', 0) > 0.7:
+                    encoding = detected.get('encoding', 'utf-8')
+                    content_text = file_content.decode(encoding)
+            except:
+                pass
+
+        return {
+            "entry_id": entry['entry_id'],
+            "filename": entry['filename'],
+            "file_size": entry['file_size'],
+            "mime_type": mime_type,
+            "content": content_text,
+            "is_binary": content_text is None
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting entry content: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve file content")
+
+
 # File operations
 @router.put("/entries/{entry_id}/move")
 async def move_file(
@@ -538,6 +727,9 @@ async def move_file(
     user_id: str = Depends(verify_and_get_user_id_from_jwt)
 ):
     """Move a file to a different folder."""
+    if not config.ENABLE_KNOWLEDGE_BASE:
+        raise HTTPException(status_code=503, detail="Knowledge base feature is currently disabled")
+    
     try:
         client = await db.client
         account_id = user_id

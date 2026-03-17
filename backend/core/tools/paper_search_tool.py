@@ -14,7 +14,44 @@ from core.agentpress.thread_manager import ThreadManager
     icon="GraduationCap",
     color="bg-emerald-100 dark:bg-emerald-800/50",
     weight=270,
-    visible=True
+    visible=True,
+    usage_guide="""
+### ACADEMIC PAPER SEARCH
+
+**CAPABILITIES:**
+- Search academic papers using Semantic Scholar API
+- Find papers by keywords, authors, topics
+- Get paper metadata: title, abstract, citations, authors, year
+- Access DOI links and full paper information
+
+**BEST PRACTICES:**
+- Use specific academic terms and keywords
+- Include author names when searching for specific researchers
+- Filter by year range for recent research
+- Cross-reference multiple papers for comprehensive understanding
+- Check citation counts for paper impact assessment
+
+**AUTOMATIC DEEP READING REQUIREMENT:**
+🚨 **CRITICAL**: After finding relevant papers with paper_search, you MUST automatically use get_paper_details to read papers in depth:
+- For each highly relevant paper (top 3-5 results), use get_paper_details with paper_id
+- Set include_citations=true and include_references=true for comprehensive understanding
+- Read full abstracts, TLDR summaries, and detailed metadata
+- Analyze citations and references to understand research context
+- Extract key findings, methodologies, and conclusions from paper details
+- Never rely solely on search result abstracts - always get full paper details for qualitative research
+
+**SEARCH STRATEGIES:**
+- Topic-based: "machine learning attention mechanisms"
+- Author-based: "Yoshua Bengio deep learning"
+- Combined: "transformer architecture Vaswani 2017"
+
+**RESEARCH WORKFLOW:**
+1. Use paper_search to find relevant papers
+2. Identify top 3-5 most relevant papers from results
+3. **AUTOMATICALLY** use get_paper_details for each relevant paper
+4. Read full details including abstract, TLDR, citations, references
+5. Extract and synthesize key information from paper details
+"""
 )
 class PaperSearchTool(Tool):
     def __init__(self, thread_manager: ThreadManager):

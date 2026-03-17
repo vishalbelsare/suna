@@ -17,6 +17,7 @@ import string
 import hmac
 import hashlib
 import time
+from collections import OrderedDict
 from pydantic import BaseModel, Field, field_validator
 from fastapi import HTTPException
 from core.utils.logger import logger
@@ -104,7 +105,9 @@ class APIKeyService:
     """
 
     # Class-level in-memory throttle cache (fallback when Redis unavailable)
-    _throttle_cache: Dict[str, float] = {}
+    # LRU cache with max size to prevent unbounded growth
+    _throttle_cache: OrderedDict[str, float] = OrderedDict()
+    _max_throttle_cache_size = 500  # Maximum entries before cleanup
 
     def __init__(self, db: DBConnection):
         self.db = db
@@ -353,8 +356,7 @@ class APIKeyService:
             cache_key = f"api_key:{public_key}:{self._hash_secret_key(secret_key)[:8]}"
 
             try:
-                redis_client = await redis.get_client()
-                cached_result = await redis_client.get(cache_key)
+                cached_result = await redis.get(cache_key)
                 if cached_result:
                     import json
 
@@ -458,7 +460,6 @@ class APIKeyService:
     ):
         """Cache validation result in Redis"""
         try:
-            redis_client = await redis.get_client()
             import json
 
             cache_data = {
@@ -467,7 +468,7 @@ class APIKeyService:
                 "key_id": str(result.key_id) if result.key_id else None,
                 "error_message": result.error_message,
             }
-            await redis_client.setex(cache_key, ttl, json.dumps(cache_data))
+            await redis.setex(cache_key, ttl, json.dumps(cache_data))
         except Exception as e:
             logger.warning(f"Failed to cache validation result: {e}")
 
@@ -476,19 +477,17 @@ class APIKeyService:
         throttle_interval = config.API_KEY_LAST_USED_THROTTLE_SECONDS
         current_time = time.time()
 
-        # Try Redis first
+        # Try Redis first - optimized to use SET NX pattern (1 call instead of 2)
         try:
-            redis_client = await redis.get_client()
             throttle_key = f"last_used_throttle:{key_id}"
 
-            # Check if we've updated this key recently
-            last_update = await redis_client.get(throttle_key)
-            if last_update:
-                # Already updated within throttle interval, skip
+            # Use SET with NX (set-if-not-exists) to atomically check and set
+            # This reduces from 2 Redis calls (GET + SETEX) to 1 call
+            # Returns False if key already exists (throttled), True if set successfully
+            was_set = await redis.set(throttle_key, "1", ex=throttle_interval, nx=True, timeout=2.0)
+            if not was_set:
+                # Key already exists - already updated within throttle interval, skip
                 return
-
-            # Set throttle flag first to prevent race conditions
-            await redis_client.setex(throttle_key, throttle_interval, "1")
 
         except Exception as redis_error:
             # Fallback to in-memory throttling when Redis unavailable
@@ -496,14 +495,20 @@ class APIKeyService:
                 f"Redis unavailable for throttling, using in-memory fallback: {redis_error}"
             )
 
-            # Clean up old entries (simple cleanup every 100 operations)
-            if len(self._throttle_cache) > 1000:
-                cutoff_time = current_time - (
-                    throttle_interval * 2
-                )  # Keep extra buffer
-                self._throttle_cache = {
-                    k: v for k, v in self._throttle_cache.items() if v > cutoff_time
-                }
+            # Clean up expired entries and enforce LRU limit
+            cutoff_time = current_time - (throttle_interval * 2)  # Keep extra buffer
+            
+            # Remove expired entries
+            expired_keys = [
+                k for k, v in self._throttle_cache.items() 
+                if v < cutoff_time
+            ]
+            for k in expired_keys:
+                self._throttle_cache.pop(k, None)
+            
+            # Enforce LRU limit (remove oldest if over limit)
+            while len(self._throttle_cache) > self._max_throttle_cache_size:
+                self._throttle_cache.popitem(last=False)  # Remove oldest
 
             # Check in-memory throttle
             last_update_time = self._throttle_cache.get(key_id, 0)
@@ -511,7 +516,9 @@ class APIKeyService:
                 # Already updated within throttle interval, skip
                 return
 
-            # Set in-memory throttle
+            # Set in-memory throttle (move to end for LRU)
+            if key_id in self._throttle_cache:
+                self._throttle_cache.move_to_end(key_id)
             self._throttle_cache[key_id] = current_time
 
         # Update database
@@ -533,9 +540,8 @@ class APIKeyService:
     async def _clear_throttle(self, key_id: str):
         """Clear the throttle for a specific key (useful for testing)"""
         try:
-            redis_client = await redis.get_client()
             throttle_key = f"last_used_throttle:{key_id}"
-            await redis_client.delete(throttle_key)
+            await redis.delete(throttle_key)
             logger.debug(f"Cleared throttle for key {key_id}")
         except Exception as e:
             logger.warning(f"Failed to clear throttle for key {key_id}: {e}")

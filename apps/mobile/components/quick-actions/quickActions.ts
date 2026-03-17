@@ -1,24 +1,25 @@
-import { 
-  Image, 
-  Presentation, 
-  Table2, 
-  FileText, 
-  Users, 
-  Search 
+import {
+  Image,
+  Presentation,
+  Table2,
+  FileText,
+  Users,
+  Search,
+  MessageCircle,
 } from 'lucide-react-native';
 import type { QuickAction } from '../shared/types';
 
 /**
  * Quick Actions Configuration
- * 
+ *
  * Predefined quick actions that appear above the chat input.
  * Each action represents a capability or tool the user can access.
  */
 export const QUICK_ACTIONS: QuickAction[] = [
   {
-    id: 'image',
-    label: 'Image',
-    icon: Image,
+    id: 'general',
+    label: 'General',
+    icon: MessageCircle,
   },
   {
     id: 'slides',
@@ -26,9 +27,9 @@ export const QUICK_ACTIONS: QuickAction[] = [
     icon: Presentation,
   },
   {
-    id: 'data',
-    label: 'Data',
-    icon: Table2,
+    id: 'research',
+    label: 'Research',
+    icon: Search,
   },
   {
     id: 'docs',
@@ -36,14 +37,19 @@ export const QUICK_ACTIONS: QuickAction[] = [
     icon: FileText,
   },
   {
+    id: 'image',
+    label: 'Image',
+    icon: Image,
+  },
+  {
+    id: 'data',
+    label: 'Data',
+    icon: Table2,
+  },
+  {
     id: 'people',
     label: 'People',
     icon: Users,
-  },
-  {
-    id: 'research',
-    label: 'Research',
-    icon: Search,
   },
 ];
 

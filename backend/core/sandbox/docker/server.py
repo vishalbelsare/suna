@@ -3,7 +3,9 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 import os
+import subprocess
 from pathlib import Path
+from typing import Dict, List, Optional
 
 # Import PDF router, PPTX router, DOCX router, and Visual HTML Editor router
 from html_to_pdf_router import router as pdf_router
@@ -23,6 +25,7 @@ class WorkspaceDirMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 app = FastAPI()
+
 app.add_middleware(WorkspaceDirMiddleware)
 
 # Include routers
@@ -31,12 +34,16 @@ app.include_router(editor_router)
 app.include_router(pptx_router)
 app.include_router(docx_router)
 
-# Create output directory for generated PDFs (needed by PDF router)
+# Create downloads directory in workspace for all generated files
+downloads_dir = Path(workspace_dir) / "downloads"
+downloads_dir.mkdir(parents=True, exist_ok=True)
+
+# Mount static files for downloads (PDFs, PPTX, etc.)
+app.mount("/downloads", StaticFiles(directory=str(downloads_dir)), name="downloads")
+
+# Create output directory for generated PDFs (legacy - for backward compatibility)
 output_dir = Path("generated_pdfs")
 output_dir.mkdir(exist_ok=True)
-
-# Mount static files for PDF downloads
-app.mount("/downloads", StaticFiles(directory=str(output_dir)), name="downloads")
 
 # Initial directory creation
 os.makedirs(workspace_dir, exist_ok=True)
@@ -256,28 +263,143 @@ async def list_html_files():
         from fastapi import HTTPException
         raise HTTPException(status_code=500, detail=str(e))
 
-# Serve HTML files directly at root level
-@app.get("/{file_name}")
-async def serve_html_file(file_name: str):
-    """Serve HTML files directly for viewing"""
+# Health check endpoint - must be defined before catch-all route
+@app.get("/health")
+async def health_check():
+    """
+    Check health of all supervisord-managed services.
+    Returns aggregate status and per-service breakdown.
+
+    Returns:
+        - status: "healthy" | "starting" | "degraded" | "unhealthy"
+        - services: dict of service_name -> "running" | "stopped" | "starting" | "error"
+        - critical_services: list of services that must be running for healthy status
+    """
+    services_status: Dict[str, str] = {}
+
+    # Critical services that must be running for sandbox to be usable
+    critical_services: List[str] = ['xvfb', 'x11vnc', 'novnc', 'http_server', 'browserApi']
+
+    try:
+        # Run supervisorctl status to get all service states
+        result = subprocess.run(
+            ["supervisorctl", "status"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+
+        # Parse output format: "program_name    STATE     extra info"
+        # Example: "xvfb             RUNNING   pid 123, uptime 0:01:00"
+        for line in result.stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                service_name = parts[0]
+                state = parts[1].lower()
+
+                # Map supervisord states to our simplified states
+                if state == 'running':
+                    services_status[service_name] = 'running'
+                elif state in ('stopped', 'exited', 'fatal'):
+                    services_status[service_name] = 'stopped'
+                elif state in ('starting', 'backoff'):
+                    services_status[service_name] = 'starting'
+                else:
+                    services_status[service_name] = 'error'
+
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "unhealthy",
+            "error": "supervisorctl timeout",
+            "services": {},
+            "critical_services": critical_services
+        }
+    except FileNotFoundError:
+        return {
+            "status": "unhealthy",
+            "error": "supervisorctl not found",
+            "services": {},
+            "critical_services": critical_services
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "services": {},
+            "critical_services": critical_services
+        }
+
+    # Determine overall status based on critical services
+    critical_running = sum(
+        1 for svc in critical_services
+        if services_status.get(svc) == 'running'
+    )
+    critical_starting = sum(
+        1 for svc in critical_services
+        if services_status.get(svc) == 'starting'
+    )
+    critical_failed = sum(
+        1 for svc in critical_services
+        if services_status.get(svc) in ('stopped', 'error')
+    )
+
+    # All critical services running = healthy
+    if critical_running == len(critical_services):
+        overall = "healthy"
+    # Some starting, none failed = starting
+    elif critical_starting > 0 and critical_failed == 0:
+        overall = "starting"
+    # Some failed = degraded
+    elif critical_failed > 0 and critical_running > 0:
+        overall = "degraded"
+    # All failed or none running = unhealthy
+    else:
+        overall = "unhealthy"
+
+    return {
+        "status": overall,
+        "services": services_status,
+        "critical_services": critical_services
+    }
+
+
+# Serve files at root level
+# This route handles both HTML files and static assets (CSS, JS, images, etc.)
+# Uses :path to handle nested paths like css/style.css or js/script.js
+@app.get("/{file_path:path}")
+async def serve_file(file_path: str):
+    """Serve files from workspace - HTML files as HTML, others as static files"""
     from fastapi import HTTPException
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, FileResponse
     
-    if not file_name.endswith('.html'):
-        raise HTTPException(status_code=404, detail="File must be .html")
+    # Security: prevent directory traversal attacks
+    if '..' in file_path or file_path.startswith('/'):
+        raise HTTPException(status_code=400, detail="Invalid file path")
     
-    file_path = os.path.join(workspace_dir, file_name)
-    if not os.path.exists(file_path):
+    full_file_path = os.path.join(workspace_dir, file_path)
+    
+    # Normalize the path to prevent directory traversal
+    full_file_path = os.path.normpath(full_file_path)
+    workspace_dir_normalized = os.path.normpath(workspace_dir)
+    
+    # Ensure the file is within the workspace directory
+    if not full_file_path.startswith(workspace_dir_normalized):
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    if not os.path.exists(full_file_path) or not os.path.isfile(full_file_path):
         raise HTTPException(status_code=404, detail="File not found")
     
-    with open(file_path, 'r', encoding='utf-8') as f:
-        content = f.read()
+    # Serve HTML files with HTMLResponse
+    if file_path.endswith('.html'):
+        with open(full_file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        return HTMLResponse(content=content)
     
-    return HTMLResponse(content=content)
-
-# Mount static files but exclude them from the specific HTML route above
-# This ensures only the HTML route handles .html files, while StaticFiles handles everything else
-app.mount('/', StaticFiles(directory=workspace_dir), name='site')
+    # Serve all other files (CSS, JS, images, etc.) as static files
+    # FileResponse automatically sets the correct content-type based on file extension
+    return FileResponse(full_file_path)
 
 # This is needed for the import string approach with uvicorn
 if __name__ == '__main__':

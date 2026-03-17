@@ -1,10 +1,11 @@
 /**
  * Agent API Hooks
- * 
+ *
  * React Query hooks for agent CRUD operations.
  * Following the same patterns as useApiQueries.ts
  */
 
+import { log } from '@/lib/logger';
 import { useMutation, useQuery, useQueryClient, type UseMutationOptions, type UseQueryOptions } from '@tanstack/react-query';
 import { API_URL, getAuthHeaders } from '@/api/config';
 import type {
@@ -38,10 +39,8 @@ export function useAgents(
   return useQuery({
     queryKey: agentKeys.list(params),
     queryFn: async () => {
-      console.log('🔄 Fetching agents...');
       const headers = await getAuthHeaders();
-      console.log('📋 Auth headers obtained:', headers);
-      
+
       // Build query parameters
       const queryParams = new URLSearchParams();
       if (params.page) queryParams.append('page', params.page.toString());
@@ -56,23 +55,36 @@ export function useAgents(
       if (params.content_type) queryParams.append('content_type', params.content_type);
 
       const url = `${API_URL}/agents${queryParams.toString() ? `?${queryParams.toString()}` : ''}`;
-      console.log('🌐 API URL:', url);
-      
+
       const res = await fetch(url, { headers });
-      console.log('📡 Response status:', res.status);
-      
+
       if (!res.ok) {
         const errorText = await res.text();
-        console.error('❌ Failed to fetch agents:', res.status, errorText);
-        throw new Error(`Failed to fetch agents: ${res.status}`);
+        log.error('❌ Failed to fetch agents:', res.status);
+        throw new Error(`Failed to fetch agents: ${res.status} - ${errorText}`);
       }
-      
+
       const data = await res.json();
-      console.log('✅ Agents fetched successfully:', data);
-      
+      log.log('✅ Agents loaded:', data.agents?.length || 0);
+
       return data;
     },
     staleTime: 5 * 60 * 1000, // 5 minutes
+    gcTime: 10 * 60 * 1000, // 10 minutes - keep in cache longer
+    retry: (failureCount, error) => {
+      // Don't retry on client errors (4xx) - these won't resolve on retry
+      const is4xxError = error.message.includes('401') ||
+                         error.message.includes('403') ||
+                         error.message.includes('429');
+      if (is4xxError) {
+        log.log('🚫 Not retrying due to client error:', error.message);
+        return false;
+      }
+      // Only retry server errors (5xx) up to 2 times
+      log.log(`🔄 Retry attempt ${failureCount} for agents fetch:`, error.message);
+      return failureCount < 2;
+    },
+    retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 10000), // Exponential backoff: 1s, 2s, 4s...
     ...options,
   });
 }
@@ -145,6 +157,7 @@ export function useUpdateAgent(
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: agentKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: agentKeys.detail(data.agent_id) });
       queryClient.setQueryData(agentKeys.detail(data.agent_id), data);
     },
     ...options,
@@ -168,6 +181,30 @@ export function useDeleteAgent(
     onSuccess: (_, agentId) => {
       queryClient.invalidateQueries({ queryKey: agentKeys.lists() });
       queryClient.removeQueries({ queryKey: agentKeys.detail(agentId) });
+    },
+    ...options,
+  });
+}
+
+export function useCreateNewAgent(
+  options?: UseMutationOptions<Agent, Error, AgentCreateRequest>
+) {
+  const createAgentMutation = useCreateAgent();
+
+  return useMutation({
+    mutationFn: async (agentData: AgentCreateRequest) => {
+      const defaultAgentData: AgentCreateRequest = {
+        name: 'New Worker',
+        description: 'A newly created worker, open for configuration',
+        configured_mcps: [],
+        agentpress_tools: {},
+        is_default: false,
+        icon_name: 'brain',
+        icon_color: '#000000',
+        icon_background: '#F3F4F6',
+        ...agentData,
+      };
+      return createAgentMutation.mutateAsync(defaultAgentData);
     },
     ...options,
   });

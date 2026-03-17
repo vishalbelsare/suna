@@ -1,93 +1,147 @@
 import asyncio
 from typing import Optional, Dict, Any
 import time
-import asyncio
 from uuid import uuid4
 from core.agentpress.tool import ToolResult, openapi_schema, tool_metadata
 from core.sandbox.tool_base import SandboxToolsBase
 from core.agentpress.thread_manager import ThreadManager
+from core.utils.tool_output_streaming import stream_tool_output, get_tool_output_streaming_context, get_current_tool_call_id
+from core.utils.logger import logger
 
 @tool_metadata(
-    display_name="Terminal & Commands",
-    description="Run commands, install packages, and execute scripts in your workspace",
+    display_name="Bash",
+    description="Execute bash commands in the workspace with optional timeout",
     icon="Terminal",
     color="bg-gray-100 dark:bg-gray-800/50",
     is_core=True,
     weight=20,
-    visible=True
+    visible=True,
+    usage_guide="""
+## Bash - Execute bash commands in the workspace
+
+Executes bash commands in the workspace directory with real-time output streaming. Working directory persists between commands.
+
+IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
+
+### Before Executing Commands
+
+1. **Directory Verification:**
+   - If the command will create new directories or files, first use `ls` to verify the parent directory exists
+   - Example: before running "mkdir foo/bar", first use `ls foo` to check that "foo" exists
+
+2. **Command Execution:**
+   - Always quote file paths that contain spaces with double quotes
+   - Example: cd "/workspace/my folder" (correct) vs cd /workspace/my folder (incorrect)
+
+### When to Use
+- Installing packages (pip install, npm install, apt-get)
+- Running build commands and scripts
+- Git operations (status, diff, log, add, commit)
+- Running tests or linters
+- System administration tasks
+- Any task requiring shell execution
+
+### When NOT to Use
+- DO NOT use cat/head/tail to read files - use read_file instead
+- DO NOT use sed/awk to edit files - use edit_file or str_replace instead
+- DO NOT use echo/heredoc to create files - use create_file instead
+- DO NOT use find for file search - use Glob patterns instead
+- DO NOT use grep for content search - use search_file instead
+
+### Important Notes
+- Commands timeout after 300 seconds (5 minutes) by default
+- Output is truncated if it exceeds 50000 characters
+- Working directory is /workspace by default
+- Use ABSOLUTE paths in commands (e.g., /workspace/src/main.py)
+- Always use non-interactive flags (-y, --yes, -f) to avoid prompts
+
+### Multiple Commands
+- If commands are independent and can run in parallel, make multiple tool calls
+- If commands depend on each other, chain with && (e.g., `git add . && git commit -m "message"`)
+- Use `;` only when you need to run commands sequentially but don't care if earlier commands fail
+- Try to maintain your current working directory by using absolute paths and avoiding `cd`
+
+### Long-Running Processes
+For background processes (servers, watches), use tmux:
+```bash
+# Start background server
+tmux new-session -d -s myserver 'npm run dev'
+
+# Check on process
+tmux capture-pane -t myserver -p
+
+# Kill process
+tmux kill-session -t myserver
+```
+
+### Git Operations
+- NEVER use git commands with -i flag (interactive mode not supported)
+- NEVER use --amend unless explicitly requested
+- NEVER force push to main/master
+- When committing, use HEREDOC for multiline messages
+
+### Port 8080
+Port 8080 is AUTO-EXPOSED and publicly accessible. Files served from /workspace are automatically available via preview URLs.
+"""
 )
 class SandboxShellTool(SandboxToolsBase):
-    """Tool for executing tasks in a Daytona sandbox with browser-use capabilities. 
-    Uses sessions for maintaining state between commands and provides comprehensive process management."""
+    """Tool for executing shell commands in a Daytona sandbox.
+    Commands run synchronously with real-time output streaming.
+    For long-running processes, use tmux directly in your commands."""
 
     def __init__(self, project_id: str, thread_manager: ThreadManager):
         super().__init__(project_id, thread_manager)
-        self._sessions: Dict[str, str] = {}  # Maps session names to session IDs
-
-    async def _ensure_session(self, session_name: str = "default") -> str:
-        """Ensure a session exists and return its ID."""
-        if session_name not in self._sessions:
-            session_id = str(uuid4())
-            try:
-                await self._ensure_sandbox()  # Ensure sandbox is initialized
-                await self.sandbox.process.create_session(session_id)
-                self._sessions[session_name] = session_id
-            except Exception as e:
-                raise RuntimeError(f"Failed to create session: {str(e)}")
-        return self._sessions[session_name]
-
-    async def _cleanup_session(self, session_name: str):
-        """Clean up a session if it exists."""
-        if session_name in self._sessions:
-            try:
-                await self._ensure_sandbox()  # Ensure sandbox is initialized
-                await self.sandbox.process.delete_session(self._sessions[session_name])
-                del self._sessions[session_name]
-            except Exception as e:
-                print(f"Warning: Failed to cleanup session {session_name}: {str(e)}")
 
     @openapi_schema({
         "type": "function",
         "function": {
             "name": "execute_command",
-            "description": "Execute a shell command in the workspace directory. IMPORTANT: Commands are non-blocking by default and run in a tmux session. This is ideal for long-running operations like starting servers or build processes. Uses sessions to maintain state between commands. This tool is essential for running CLI tools, installing packages, and managing system operations.",
+            "description": """Execute a bash command in the workspace directory with optional timeout.
+
+IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
+
+Before executing the command:
+1. If the command creates new directories/files, first verify the parent directory exists using `ls`
+2. Always quote file paths that contain spaces with double quotes
+
+Usage notes:
+- Commands timeout after 300 seconds by default (max 600 seconds / 10 minutes)
+- Output is truncated if it exceeds 50000 characters
+- For long-running processes, use tmux: `tmux new-session -d -s name 'command'`
+- Chain dependent commands with && (e.g., `git add . && git commit -m "message"`)
+- Avoid using cat, head, tail, sed, awk, echo, find, grep - use dedicated tools instead""",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "The shell command to execute. Use this for running CLI tools, installing packages, or system operations. Commands can be chained using &&, ||, and | operators."
+                        "description": "**REQUIRED** - The bash command to execute. Commands run synchronously and wait for completion."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "**OPTIONAL** - Clear, concise description of what this command does. For simple commands (git, npm), keep it brief (5-10 words). For complex commands (piped commands, obscure flags), add enough context to clarify what it does."
                     },
                     "folder": {
                         "type": "string",
-                        "description": "Optional relative path to a subdirectory of /workspace where the command should be executed. Example: 'data/pdfs'"
-                    },
-                    "session_name": {
-                        "type": "string",
-                        "description": "Optional name of the tmux session to use. Use named sessions for related commands that need to maintain state. Defaults to a random session name.",
-                    },
-                    "blocking": {
-                        "type": "boolean",
-                        "description": "Whether to wait for the command to complete. Defaults to false for non-blocking execution.",
-                        "default": False
+                        "description": "**OPTIONAL** - Relative path to a subdirectory of /workspace where the command should be executed. Example: 'src/data'"
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "Optional timeout in seconds for blocking commands. Defaults to 60. Ignored for non-blocking commands.",
-                        "default": 60
+                        "description": "**OPTIONAL** - Timeout in seconds (max 600). Default: 300 (5 minutes). Increase for longer operations.",
+                        "default": 300
                     }
                 },
-                "required": ["command"]
+                "required": ["command"],
+                "additionalProperties": False
             }
         }
     })
     async def execute_command(
-        self, 
-        command: str, 
+        self,
+        command: str,
+        description: Optional[str] = None,
         folder: Optional[str] = None,
-        session_name: Optional[str] = None,
-        blocking: bool = False,
-        timeout: int = 60
+        timeout: int = 300
     ) -> ToolResult:
         try:
             # Ensure sandbox is initialized
@@ -99,354 +153,256 @@ class SandboxShellTool(SandboxToolsBase):
                 folder = folder.strip('/')
                 cwd = f"{self.workspace_path}/{folder}"
             
-            # Generate a session name if not provided
-            if not session_name:
-                session_name = f"session_{str(uuid4())[:8]}"
+            # Use PTY for real-time streaming
+            tool_output_ctx = get_tool_output_streaming_context()
+            tool_call_id = get_current_tool_call_id() or f"cmd_{str(uuid4())[:8]}"
+            logger.debug(f"[SHELL STREAMING] Using tool_call_id: {tool_call_id}")
             
-            # Check if tmux session already exists
-            check_session = await self._execute_raw_command(f"tmux has-session -t {session_name} 2>/dev/null || echo 'not_exists'")
-            session_exists = "not_exists" not in check_session.get("output", "")
+            # Track output for streaming
+            output_buffer = []
+            exit_code = 0
             
-            if not session_exists:
-                # Create a new tmux session with the specified working directory
-                await self._execute_raw_command(f"tmux new-session -d -s {session_name} -c {cwd}")
-            
-            # Escape double quotes for the command
-            wrapped_command = command.replace('"', '\\"')
-            
-            if blocking:
-                # For blocking execution, use a more reliable approach
-                # Add a unique marker to detect command completion
-                marker = f"COMMAND_DONE_{str(uuid4())[:8]}"
-                completion_command = self._format_completion_command(command, marker)
-                wrapped_completion_command = completion_command.replace('"', '\\"')
-                
-                # Send the command with completion marker
-                await self._execute_raw_command(f'tmux send-keys -t {session_name} "{wrapped_completion_command}" Enter')
-                
-                start_time = time.time()
-                final_output = ""
-                
-                while (time.time() - start_time) < timeout:
-                    # Wait a shorter interval for more responsive checking
-                    await asyncio.sleep(0.5)
-                    
-                    # Check if session still exists (command might have exited)
-                    check_result = await self._execute_raw_command(f"tmux has-session -t {session_name} 2>/dev/null || echo 'ended'")
-                    if "ended" in check_result.get("output", ""):
-                        break
-                        
-                    # Get current output and check for our completion marker
-                    output_result = await self._execute_raw_command(f"tmux capture-pane -t {session_name} -p -S - -E -")
-                    current_output = output_result.get("output", "")
-
-                    if self._is_command_completed(current_output, marker):
-                        final_output = current_output
-                        break
-                
-                # If we didn't get the marker, capture whatever output we have
-                if not final_output:
-                    output_result = await self._execute_raw_command(f"tmux capture-pane -t {session_name} -p -S - -E -")
-                    final_output = output_result.get("output", "")
-                
-                # Kill the session after capture
-                await self._execute_raw_command(f"tmux kill-session -t {session_name}")
-                
-                return self.success_response({
-                    "output": final_output,
-                    "session_name": session_name,
-                    "cwd": cwd,
-                    "completed": True
-                })
-            else:
-                # Send command to tmux session for non-blocking execution
-                await self._execute_raw_command(f'tmux send-keys -t {session_name} "{wrapped_command}" Enter')
-                
-                # For non-blocking, just return immediately
-                return self.success_response({
-                    "session_name": session_name,
-                    "cwd": cwd,
-                    "message": f"Command sent to tmux session '{session_name}'. Use check_command_output to view results.",
-                    "completed": False
-                })
-                
-        except Exception as e:
-            # Attempt to clean up session in case of error
-            if session_name:
+            async def on_pty_data(data: bytes):
                 try:
-                    await self._execute_raw_command(f"tmux kill-session -t {session_name}")
+                    text = data.decode("utf-8", errors="replace")
+                    output_buffer.append(text)
+                    
+                    # Stream output to frontend if we have a tool output streaming context
+                    if tool_output_ctx:
+                        await stream_tool_output(
+                            tool_call_id=tool_call_id,
+                            output_chunk=text,
+                            is_final=False,
+                            tool_name="execute_command"
+                        )
+                except Exception as e:
+                    logger.warning(f"Error processing PTY output: {e}")
+            
+            try:
+                from daytona_sdk.common.pty import PtySize
+                
+                pty_session_id = f"cmd-{str(uuid4())[:8]}"
+                
+                # Create PTY session with output callback
+                pty_handle = await self.sandbox.process.create_pty_session(
+                    id=pty_session_id,
+                    on_data=on_pty_data,
+                    pty_size=PtySize(cols=120, rows=40)
+                )
+                
+                # Always cd to workspace directory since PTY starts in container's WORKDIR (/app)
+                await pty_handle.send_input(f"cd {cwd}\n")
+                await asyncio.sleep(0.1)
+                
+                # Add marker to detect completion
+                marker = f"__CMD_DONE_{str(uuid4())[:8]}__"
+                
+                # Check if command contains a heredoc - if so, we need the marker on a new line
+                # Heredocs require the delimiter (EOF, etc.) to be on its own line
+                # Common heredoc patterns: << EOF, << 'EOF', << "EOF", <<- EOF, <<-'EOF', etc.
+                import re
+                heredoc_pattern = r'<<-?\s*[\'"]?\w+[\'"]?\s*$'
+                if re.search(heredoc_pattern, command, re.MULTILINE):
+                    # Command has heredoc - put marker on a separate line
+                    full_command = f"{command}\necho '{marker}' $?\n"
+                else:
+                    full_command = f"{command}; echo '{marker}' $?\n"
+                
+                # Send the command
+                await pty_handle.send_input(full_command)
+                
+                # Wait for completion or timeout
+                # Note: marker appears TWICE in output:
+                # 1. When the terminal echoes the typed command
+                # 2. When the echo command actually executes after completion
+                # We need to wait for the SECOND occurrence
+                start_time = time.time()
+                while (time.time() - start_time) < timeout:
+                    await asyncio.sleep(0.1)
+                    
+                    # Check if marker appeared in output (need 2 occurrences)
+                    current_output = "".join(output_buffer)
+                    marker_count = current_output.count(marker)
+                    if marker_count >= 2:
+                        # Extract exit code from the LAST marker line (the actual output)
+                        try:
+                            marker_idx = current_output.rfind(marker)
+                            after_marker = current_output[marker_idx + len(marker):].strip().split()[0]
+                            exit_code = int(after_marker) if after_marker.isdigit() else 0
+                        except:
+                            exit_code = 0
+                        break
+                else:
+                    # Timeout reached
+                    exit_code = -1
+                
+                # Kill PTY session
+                try:
+                    await pty_handle.kill()
                 except:
                     pass
+                
+                # Clean output (remove marker line and control sequences)
+                final_output = "".join(output_buffer)
+                
+                # Remove the marker line from output
+                if marker in final_output:
+                    marker_idx = final_output.rfind(marker)
+                    # Find the start of the line containing the marker
+                    line_start = final_output.rfind('\n', 0, marker_idx)
+                    if line_start != -1:
+                        final_output = final_output[:line_start]
+                
+                # Strip ANSI escape sequences for cleaner output
+                import re
+                ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+                final_output = ansi_escape.sub('', final_output)
+                
+                # Stream final message
+                if tool_output_ctx:
+                    await stream_tool_output(
+                        tool_call_id=tool_call_id,
+                        output_chunk="",
+                        is_final=True,
+                        tool_name="execute_command"
+                    )
+                
+                if exit_code == -1:
+                    return self.success_response({
+                        "output": final_output.strip(),
+                        "cwd": cwd,
+                        "exit_code": exit_code,
+                        "timeout": True,
+                        "message": f"Command timed out after {timeout} seconds. For long-running processes, use tmux: `tmux new-session -d -s name 'command'`"
+                    })
+                
+                return self.success_response({
+                    "output": final_output.strip(),
+                    "cwd": cwd,
+                    "exit_code": exit_code
+                })
+                
+            except Exception as pty_error:
+                logger.warning(f"PTY execution failed, falling back to direct execution: {pty_error}")
+                # Fall back to direct session execution
+                return await self._fallback_execute(command, cwd, timeout)
+                
+        except Exception as e:
             return self.fail_response(f"Error executing command: {str(e)}")
 
-    async def _execute_raw_command(self, command: str) -> Dict[str, Any]:
-        """Execute a raw command directly in the sandbox."""
-        # Ensure session exists for raw commands
-        session_id = await self._ensure_session("raw_commands")
-        
-        # Execute command in session
-        from daytona_sdk import SessionExecuteRequest
-        req = SessionExecuteRequest(
-            command=command,
-            var_async=False,
-            cwd=self.workspace_path
-        )
-        
-        response = await self.sandbox.process.execute_session_command(
-            session_id=session_id,
-            req=req,
-            timeout=30  # Short timeout for utility commands
-        )
-        
-        logs = await self.sandbox.process.get_session_command_logs(
-            session_id=session_id,
-            command_id=response.cmd_id
-        )
-        
-        return {
-            "output": logs,
-            "exit_code": response.exit_code
-        }
-
-    @openapi_schema({
-        "type": "function",
-        "function": {
-            "name": "check_command_output",
-            "description": "Check the output of a previously executed command in a tmux session. Use this to monitor the progress or results of non-blocking commands.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "session_name": {
-                        "type": "string",
-                        "description": "The name of the tmux session to check."
-                    },
-                    "kill_session": {
-                        "type": "boolean",
-                        "description": "Whether to terminate the tmux session after checking. Set to true when you're done with the command.",
-                        "default": False
-                    }
-                },
-                "required": ["session_name"]
-            }
-        }
-    })
-    async def check_command_output(
-        self,
-        session_name: str,
-        kill_session: bool = False
-    ) -> ToolResult:
+    async def _fallback_execute(self, command: str, cwd: str, timeout: int) -> ToolResult:
+        """Fallback execution method using direct session commands."""
         try:
-            # Ensure sandbox is initialized
-            await self._ensure_sandbox()
+            from daytona_sdk import SessionExecuteRequest
             
-            # Check if session exists
-            check_result = await self._execute_raw_command(f"tmux has-session -t {session_name} 2>/dev/null || echo 'not_exists'")
-            if "not_exists" in check_result.get("output", ""):
-                return self.fail_response(f"Tmux session '{session_name}' does not exist.")
+            session_id = f"cmd_{str(uuid4())[:8]}"
+            await self.sandbox.process.create_session(session_id)
             
-            # Get output from tmux pane
-            output_result = await self._execute_raw_command(f"tmux capture-pane -t {session_name} -p -S - -E -")
-            output = output_result.get("output", "")
-            
-            # Kill session if requested
-            if kill_session:
-                await self._execute_raw_command(f"tmux kill-session -t {session_name}")
-                termination_status = "Session terminated."
-            else:
-                termination_status = "Session still running."
-            
-            return self.success_response({
-                "output": output,
-                "session_name": session_name,
-                "status": termination_status
-            })
+            try:
+                req = SessionExecuteRequest(
+                    command=command,
+                    var_async=False,
+                    cwd=cwd
+                )
                 
-        except Exception as e:
-            return self.fail_response(f"Error checking command output: {str(e)}")
-
-    @openapi_schema({
-        "type": "function",
-        "function": {
-            "name": "terminate_command",
-            "description": "Terminate a running command by killing its tmux session.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "session_name": {
-                        "type": "string",
-                        "description": "The name of the tmux session to terminate."
-                    }
-                },
-                "required": ["session_name"]
-            }
-        }
-    })
-    async def terminate_command(
-        self,
-        session_name: str
-    ) -> ToolResult:
-        try:
-            # Ensure sandbox is initialized
-            await self._ensure_sandbox()
-            
-            # Check if session exists
-            check_result = await self._execute_raw_command(f"tmux has-session -t {session_name} 2>/dev/null || echo 'not_exists'")
-            if "not_exists" in check_result.get("output", ""):
-                return self.fail_response(f"Tmux session '{session_name}' does not exist.")
-            
-            # Kill the session
-            await self._execute_raw_command(f"tmux kill-session -t {session_name}")
-            
-            return self.success_response({
-                "message": f"Tmux session '{session_name}' terminated successfully."
-            })
+                response = await self.sandbox.process.execute_session_command(
+                    session_id=session_id,
+                    req=req,
+                    timeout=timeout
+                )
                 
-        except Exception as e:
-            return self.fail_response(f"Error terminating command: {str(e)}")
-
-    @openapi_schema({
-        "type": "function",
-        "function": {
-            "name": "list_commands",
-            "description": "List all running tmux sessions and their status.",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        }
-    })
-    async def list_commands(self) -> ToolResult:
-        try:
-            # Ensure sandbox is initialized
-            await self._ensure_sandbox()
-            
-            # List all tmux sessions
-            result = await self._execute_raw_command("tmux list-sessions 2>/dev/null || echo 'No sessions'")
-            output = result.get("output", "")
-            
-            if "No sessions" in output or not output.strip():
+                logs = await self.sandbox.process.get_session_command_logs(
+                    session_id=session_id,
+                    command_id=response.cmd_id
+                )
+                
+                logs_output = logs.output if logs and logs.output else ""
+                
                 return self.success_response({
-                    "message": "No active tmux sessions found.",
-                    "sessions": []
+                    "output": logs_output,
+                    "cwd": cwd,
+                    "exit_code": response.exit_code
                 })
-            
-            # Parse session list
-            sessions = []
-            for line in output.split('\n'):
-                if line.strip():
-                    parts = line.split(':')
-                    if parts:
-                        session_name = parts[0].strip()
-                        sessions.append(session_name)
-            
-            return self.success_response({
-                "message": f"Found {len(sessions)} active sessions.",
-                "sessions": sessions
-            })
-                
+            finally:
+                try:
+                    await self.sandbox.process.delete_session(session_id)
+                except:
+                    pass
+                    
         except Exception as e:
-            return self.fail_response(f"Error listing commands: {str(e)}")
+            return self.fail_response(f"Error executing command: {str(e)}")
 
-    def _format_completion_command(self, command: str, marker: str) -> str:
-        """Format command with completion marker, handling heredocs properly."""
-        import re
+    async def _execute_raw_command(self, command: str, retry_count: int = 0) -> Dict[str, Any]:
+        """Execute a raw command directly in the sandbox.
         
-        # Check if command contains heredoc syntax
-        # Look for patterns like: << EOF, << 'EOF', << "EOF", <<EOF
-        heredoc_pattern = r'<<\s*[\'"]?\w+[\'"]?'
-        
-        if re.search(heredoc_pattern, command):
-            # For heredoc commands, add the completion marker on a new line
-            # This ensures it executes after the heredoc completes
-            return f"{command}\necho {marker}"
-        else:
-            # For regular commands, use semicolon separator
-            return f"{command} ; echo {marker}"
-
-    def _is_command_completed(self, current_output: str, marker: str) -> bool:
-        """
-        Check if command execution is completed by comparing marker from end to start.
+        Uses a per-call session to avoid race conditions when multiple commands run in parallel.
         
         Args:
-            current_output: Current output content
-            marker: Completion marker
-            
-        Returns:
-            bool: True if command completed, False otherwise
+            command: The command to execute
+            retry_count: Internal counter for retry attempts (max 2)
         """
-        if not current_output or not marker:
-            return False
-
-        # Find the last complete marker match position to start comparison
-        # Avoid terminal prompt output at the end
-        marker_end_pos = -1
-        for i in range(len(current_output) - len(marker), -1, -1):
-            if current_output[i:i+len(marker)] == marker:
-                marker_end_pos = i + len(marker) - 1
-                break
+        session_id = f"cmd_{str(uuid4())[:8]}"
         
-        # Start comparison from found marker position or end of output
-        if marker_end_pos != -1:
-            output_idx = marker_end_pos
-            marker_idx = len(marker) - 1
-        else:
-            output_idx = len(current_output) - 1
-            marker_idx = len(marker) - 1
+        from daytona_sdk import SessionExecuteRequest
         
-        # Compare characters from end to start
-        while marker_idx >= 0 and output_idx >= 0:
-            # Skip newlines in current_output
-            if current_output[output_idx] == '\n':
-                output_idx -= 1
-                continue
-                
-            # Compare characters
-            if current_output[output_idx] != marker[marker_idx]:
-                return False
-                
-            # Continue comparison
-            output_idx -= 1
-            marker_idx -= 1
-        
-        # If marker not fully matched
-        if marker_idx >= 0:
-            return False
-            
-        # Check if preceded by "echo " (command just started)
-        check_count = 0
-        echo_chars = "echo "
-        echo_idx = len(echo_chars) - 1
-        
-        while output_idx >= 0 and check_count < 5:
-            # Skip newlines
-            if current_output[output_idx] == '\n':
-                output_idx -= 1
-                continue
-                
-            check_count += 1
-            
-            # Check for "echo " pattern
-            if echo_idx >= 0 and current_output[output_idx] == echo_chars[echo_idx]:
-                echo_idx -= 1
-            else:
-                echo_idx = len(echo_chars) - 1
-                
-            output_idx -= 1
-            
-        # If "echo " found, command just started
-        if echo_idx < 0:
-            return False
-            
-        return True
-
-    async def cleanup(self):
-        """Clean up all sessions."""
-        for session_name in list(self._sessions.keys()):
-            await self._cleanup_session(session_name)
-        
-        # Also clean up any tmux sessions
         try:
             await self._ensure_sandbox()
-            await self._execute_raw_command("tmux kill-server 2>/dev/null || true")
-        except:
-            pass
+            await self.sandbox.process.create_session(session_id)
+            
+            req = SessionExecuteRequest(
+                command=command,
+                var_async=False,
+                cwd=self.workspace_path
+            )
+            
+            response = await self.sandbox.process.execute_session_command(
+                session_id=session_id,
+                req=req,
+                timeout=30
+            )
+            
+            logs = await self.sandbox.process.get_session_command_logs(
+                session_id=session_id,
+                command_id=response.cmd_id
+            )
+            
+            logs_output = logs.output if logs and logs.output else ""
+            
+            return {
+                "output": logs_output,
+                "exit_code": response.exit_code
+            }
+            
+        except Exception as e:
+            error_str = str(e).lower()
+            error_repr = repr(e).lower()
+            is_session_error = (
+                "session not found" in error_str or
+                "not found" in error_str or
+                "session" in error_str and "not" in error_str and "found" in error_str or
+                "404" in error_str or
+                "session not found" in error_repr
+            )
+            
+            if is_session_error and retry_count < 2:
+                logger.warning(
+                    f"Session error detected (attempt {retry_count + 1}/2): {type(e).__name__}: {e}. "
+                    f"Retrying with new session..."
+                )
+                return await self._execute_raw_command(command, retry_count + 1)
+            else:
+                if is_session_error:
+                    logger.error(
+                        f"Session error persisted after {retry_count + 1} attempts. "
+                        f"Error: {type(e).__name__}: {e}"
+                    )
+                raise
+        finally:
+            try:
+                await self.sandbox.process.delete_session(session_id)
+            except:
+                pass
+
+    async def cleanup(self):
+        """Clean up resources."""
+        pass

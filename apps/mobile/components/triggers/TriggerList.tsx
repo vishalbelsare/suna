@@ -1,79 +1,105 @@
 /**
- * Trigger List Component
- * 
- * Reusable list of triggers using the generic ItemList component
+ * Trigger List Component - Unified trigger list
+ *
+ * Uses unified EntityList and SelectableListItem for consistency
+ * Splits triggers into Running and Paused sections
  */
 
 import React from 'react';
-import { type ViewProps } from 'react-native';
-import { ItemList } from '@/components/shared/ItemList';
+import { View } from 'react-native';
+import { Text } from '@/components/ui/text';
 import { TriggerListItem } from './TriggerListItem';
 import type { TriggerWithAgent } from '@/api/types';
-import { Zap } from 'lucide-react-native';
 
-interface TriggerListProps extends ViewProps {
+interface TriggerListProps {
   triggers: TriggerWithAgent[];
   onTriggerPress?: (trigger: TriggerWithAgent) => void;
   isLoading?: boolean;
-  isRefreshing?: boolean;
-  onRefresh?: () => void;
-  emptyStateTitle?: string;
-  emptyStateDescription?: string;
-  emptyStateAction?: {
-    label: string;
-    onPress: () => void;
-  };
-  showSearch?: boolean;
+  error?: Error | null;
   searchQuery?: string;
-  onSearchChange?: (query: string) => void;
-  onSearchClear?: () => void;
-  disableVirtualization?: boolean;
+  showChevron?: boolean;
 }
 
 export function TriggerList({
   triggers,
   onTriggerPress,
   isLoading = false,
-  isRefreshing = false,
-  onRefresh,
-  emptyStateTitle,
-  emptyStateDescription,
-  emptyStateAction,
-  showSearch = false,
+  error = null,
   searchQuery = '',
-  onSearchChange,
-  onSearchClear,
-  disableVirtualization = false,
-  style,
-  ...props
+  showChevron = true,
 }: TriggerListProps) {
+  // Split triggers into Running and Paused
+  const runningTriggers = React.useMemo(
+    () => triggers.filter((trigger) => trigger.is_active),
+    [triggers]
+  );
+
+  const pausedTriggers = React.useMemo(
+    () => triggers.filter((trigger) => !trigger.is_active),
+    [triggers]
+  );
+
+  if (isLoading) {
+    return (
+      <View className="items-center justify-center py-16">
+        <Text className="font-roobert text-sm text-muted-foreground">Loading triggers...</Text>
+      </View>
+    );
+  }
+
+  if (error) {
+    return (
+      <View className="items-center justify-center py-16">
+        <Text className="font-roobert text-sm text-destructive">
+          Failed to load triggers. Please try again.
+        </Text>
+      </View>
+    );
+  }
+
+  if (triggers.length === 0) {
+    return (
+      <View className="items-center justify-center py-16">
+        <Text className="font-roobert text-sm text-muted-foreground">No triggers available</Text>
+      </View>
+    );
+  }
+
   return (
-    <ItemList
-      items={triggers}
-      keyExtractor={(trigger) => trigger.trigger_id}
-      renderItem={(trigger) => (
-        <TriggerListItem
-          trigger={trigger}
-          onPress={onTriggerPress}
-        />
+    <View className="gap-6">
+      {/* Running Section */}
+      {runningTriggers.length > 0 && (
+        <View className="gap-3">
+          <Text className="font-roobert-medium text-sm text-foreground">Running</Text>
+          <View className="gap-2">
+            {runningTriggers.map((trigger) => (
+              <TriggerListItem
+                key={trigger.trigger_id}
+                trigger={trigger}
+                onPress={onTriggerPress}
+                showChevron={showChevron}
+              />
+            ))}
+          </View>
+        </View>
       )}
-      showSearch={showSearch}
-      searchQuery={searchQuery}
-      onSearchChange={onSearchChange}
-      searchPlaceholder="Search triggers..."
-      onSearchClear={onSearchClear}
-      isLoading={isLoading}
-      isRefreshing={isRefreshing}
-      onRefresh={onRefresh}
-      disableVirtualization={disableVirtualization}
-      emptyState={{
-        icon: Zap,
-        title: emptyStateTitle || "No triggers found",
-        description: emptyStateDescription || "Create your first trigger to get started",
-        action: emptyStateAction,
-      }}
-      style={style}
-      {...props}
-    />
+
+      {/* Paused Section */}
+      {pausedTriggers.length > 0 && (
+        <View className="gap-3">
+          <Text className="font-roobert-medium text-sm text-foreground">Paused</Text>
+          <View className="gap-2">
+            {pausedTriggers.map((trigger) => (
+              <TriggerListItem
+                key={trigger.trigger_id}
+                trigger={trigger}
+                onPress={onTriggerPress}
+                showChevron={showChevron}
+              />
+            ))}
+          </View>
+        </View>
+      )}
+    </View>
   );
 }

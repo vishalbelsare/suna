@@ -10,10 +10,10 @@ Endpoints:
 """
 
 import os
-import httpx
 import tempfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import RedirectResponse
@@ -21,7 +21,9 @@ from pydantic import BaseModel, Field
 
 from core.utils.auth_utils import verify_and_get_user_id_from_jwt
 from core.utils.logger import logger
+from core.utils.config import config
 from core.services.supabase import DBConnection
+from core.services.http_client import get_http_client
 from .google_slides_service import GoogleSlidesService, OAuthTokenService
 
 
@@ -63,8 +65,8 @@ class ConvertToSlidesResponse(BaseModel):
 
 async def get_db_connection() -> DBConnection:
     """Get database connection."""
+    # Use singleton - already initialized at startup
     db = DBConnection()
-    await db.initialize()
     return db
 
 
@@ -133,8 +135,8 @@ async def google_oauth_callback(
     This endpoint receives the authorization code from Google and exchanges it for tokens.
     Redirects to the frontend with success/error status.
     """
-    # Get frontend URL from environment (supports different environments)
-    frontend_url = os.getenv("FRONTEND_URL")
+    # Get frontend URL from config (supports different environments)
+    frontend_url = config.FRONTEND_URL
     
     if error:
         logger.error(f"Google OAuth error: {error}")
@@ -224,14 +226,15 @@ async def convert_and_upload_to_google_slides(
         # Step 2: Call sandbox to convert HTML to PPTX
         logger.debug(f"Converting presentation at {request.presentation_path}")
         
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with get_http_client() as client:
             convert_response = await client.post(
                 f"{request.sandbox_url}/presentation/convert-to-pptx",
                 json={
                     "presentation_path": request.presentation_path,
                     "download": True,  # Get PPTX content directly, don't store locally
                     "upload_to_google_slides": False,  # We'll handle Google upload from main backend
-                }
+                },
+                timeout=120.0
             )
             
             if not convert_response.is_success:
@@ -250,7 +253,12 @@ async def convert_and_upload_to_google_slides(
             # Extract filename from Content-Disposition header
             filename = "presentation.pptx"  # default
             content_disposition = convert_response.headers.get("Content-Disposition", "")
-            if "filename=" in content_disposition:
+            if "filename*=UTF-8''" in content_disposition:
+                # RFC5987 format: filename*=UTF-8''encoded_name
+                encoded_name = content_disposition.split("filename*=UTF-8''")[1].split(';')[0]
+                filename = unquote(encoded_name)
+            elif 'filename="' in content_disposition:
+                # Legacy format: filename="name"
                 filename = content_disposition.split('filename="')[1].split('"')[0]
         
         logger.debug(f"PPTX conversion successful: {filename}")

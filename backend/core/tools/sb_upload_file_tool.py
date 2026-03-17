@@ -18,7 +18,39 @@ from core.utils.config import config
     icon="Upload",
     color="bg-teal-100 dark:bg-teal-800/50",
     weight=230,
-    visible=True
+    visible=True,
+    usage_guide="""
+### FILE UPLOAD & CLOUD STORAGE
+
+**PURPOSE:** Upload files from sandbox workspace to private cloud storage (Supabase S3) with secure signed URLs
+
+**WHEN TO USE:**
+- **ONLY when user explicitly requests file sharing** or asks for permanent URLs
+- **ONLY when user asks for files to be accessible externally** or beyond sandbox session
+- **ASK USER FIRST** in most cases: "Would you like me to upload this file to secure cloud storage for sharing?"
+- User specifically requests file sharing or external access
+- User asks for permanent or persistent file access
+- **DO NOT automatically upload** unless explicitly requested
+
+**UPLOAD PARAMETERS:**
+- `file_path`: Path relative to /workspace (e.g., "report.pdf", "data/results.csv")
+- `custom_filename`: Optional custom name for the uploaded file
+
+**STORAGE:**
+- Files stored in secure private storage with user isolation
+- Signed URL access with 24-hour expiration
+- Each user can only access their own files
+
+**UPLOAD WORKFLOW:**
+1. Ask before uploading: "Would you like me to upload this file to secure cloud storage for sharing?"
+2. If user says yes: Use upload_file with file_path parameter
+3. Share the secure URL (note: expires in 24 hours)
+
+**INTEGRATED WORKFLOW:**
+- Create file → Ask user if upload needed → Upload only if requested → Share secure URL
+- Generate image → Ask about cloud storage → Upload only if requested
+- Browser screenshots: Continue automatic upload (no changes)
+"""
 )
 class SandboxUploadFileTool(SandboxToolsBase):
     def __init__(self, project_id: str, thread_manager: ThreadManager):
@@ -30,32 +62,27 @@ class SandboxUploadFileTool(SandboxToolsBase):
         "type": "function",
         "function": {
             "name": "upload_file",
-            "description": "Securely upload a file from the sandbox workspace to private cloud storage (Supabase S3). Returns a secure signed URL that expires after 24 hours for access control and security.",
+            "description": "Securely upload a file from the sandbox workspace to private cloud storage (Supabase S3). Returns a secure signed URL that expires after 24 hours for access control and security. **🚨 PARAMETER NAMES**: Use EXACTLY these parameter names: `file_path` (REQUIRED), `custom_filename` (optional).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to the file in the sandbox, relative to /workspace (e.g., 'output.pdf', 'data/results.csv')"
-                    },
-                    "bucket_name": {
-                        "type": "string",
-                        "description": "Target storage bucket. Options: 'file-uploads' (default - secure private storage), 'browser-screenshots' (browser automation only). Default: 'file-uploads'",
-                        "default": "file-uploads"
+                        "description": "**REQUIRED** - Path to the file in the sandbox, relative to /workspace. Example: 'output.pdf', 'data/results.csv'"
                     },
                     "custom_filename": {
                         "type": "string",
-                        "description": "Optional custom filename for the uploaded file. If not provided, uses original filename with timestamp"
-                    },
+                        "description": "**OPTIONAL** - Custom filename for the uploaded file. If not provided, uses original filename with timestamp."
+                    }
                 },
-                "required": ["file_path"]
+                "required": ["file_path"],
+                "additionalProperties": False
             }
         }
     })
     async def upload_file(
         self,
         file_path: str,
-        bucket_name: str = "file-uploads",
         custom_filename: Optional[str] = None
     ) -> ToolResult:
         try:
@@ -93,6 +120,7 @@ class SandboxUploadFileTool(SandboxToolsBase):
                 storage_filename = f"{name_base}_{timestamp}_{unique_id}{file_extension}"
             
             storage_path = f"{account_id}/{storage_filename}"
+            bucket_name = "file-uploads"  # Always use file-uploads bucket
 
             try:
                 client = await self.db.client
@@ -114,7 +142,7 @@ class SandboxUploadFileTool(SandboxToolsBase):
                 
                 url_expires_at = datetime.now() + timedelta(seconds=expires_in)
                 
-                await self._track_upload(
+                file_upload_id = await self._track_upload(
                     client,
                     account_id,
                     storage_path,
@@ -131,8 +159,10 @@ class SandboxUploadFileTool(SandboxToolsBase):
                 message += f"📏 Size: {self._format_file_size(file_info.size)}\n"
                 message += f"🔗 Secure Access URL: {signed_url}\n"
                 message += f"⏰ URL expires: {url_expires_at.strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-                message += f"\n🔐 This file is stored in private, secure storage with account isolation."
-                
+                if file_upload_id:
+                    message += f"📋 File ID: {file_upload_id}\n"
+                message += "\n🔐 This file is stored in private, secure storage with account isolation."
+
                 return self.success_response(message)
                 
             except Exception as e:
@@ -184,7 +214,7 @@ class SandboxUploadFileTool(SandboxToolsBase):
             
             user_id = None
             try:
-                account_result = await client.table('basejump.account_user').select('user_id').eq('account_id', account_id).limit(1).execute()
+                account_result = await client.schema("basejump").table('account_user').select('user_id').eq('account_id', account_id).limit(1).execute()
                 if account_result.data:
                     user_id = account_result.data[0].get('user_id')
             except Exception:
@@ -210,10 +240,14 @@ class SandboxUploadFileTool(SandboxToolsBase):
                 }
             }
             
-            await client.table('file_uploads').insert(upload_data).execute()
+            result = await client.table('file_uploads').insert(upload_data).execute()
+            file_upload_id = result.data[0]['id'] if result.data else None
+            
+            return file_upload_id
             
         except Exception as e:
             logger.warning(f"Failed to track file upload in database: {str(e)}")
+            return None
     
     def _format_file_size(self, size_bytes: int) -> str:
         for unit in ['B', 'KB', 'MB', 'GB']:

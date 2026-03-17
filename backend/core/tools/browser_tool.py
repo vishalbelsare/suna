@@ -12,12 +12,98 @@ from PIL import Image
 from core.utils.config import config
 
 @tool_metadata(
-    display_name="Web Browser",
-    description="Browse websites, click buttons, fill forms, and extract information from web pages",
+    display_name="Browser",
+    description="Interact with web pages using mouse and keyboard, take screenshots, and extract content",
     icon="Globe",
     color="bg-cyan-100 dark:bg-cyan-800/50",
     weight=60,
-    visible=True
+    visible=True,
+    usage_guide="""
+## Browser - Web page interaction and automation
+
+Use a mouse and keyboard to interact with a web browser, and take screenshots. Full browser automation using natural language actions in a sandboxed environment.
+
+### Available Tools
+- **browser_navigate_to**: Navigate to any URL
+- **browser_act**: Perform ANY action using natural language (click, type, scroll, etc.)
+- **browser_extract_content**: Extract structured data from pages
+- **browser_screenshot**: Capture current page state
+
+### When to Use
+- Interacting with websites that require clicks, forms, logins
+- Extracting data from dynamic pages that require JavaScript
+- Filling out forms or completing multi-step web flows
+- Verifying website state or visual elements
+- Any task requiring visual inspection of web content
+
+### ⚠️ DIRECT URL/WEBSITE RESEARCH (IMPORTANT!)
+When the user mentions a SPECIFIC website/URL to research (e.g. "create a slide deck for example.io"):
+1. **USE BROWSER FIRST** - Navigate to the URL directly with browser_navigate_to
+2. Browse through key pages (home, features, pricing, about) to understand the product
+3. Use browser_extract_content to capture the information you need
+4. THEN optionally use web_search for additional context, reviews, or news
+- **NEVER** do a generic web search when the user wants info about a SPECIFIC website - browse it directly!
+
+### ⚠️ INFORMATION REUSE (CRITICAL!)
+- Once you've extracted content from a website using browser_extract_content, that is your **PRIMARY SOURCE OF TRUTH**
+- DO NOT let web search results override or replace the information you extracted directly from the website
+- Web search is only for ADDITIONAL context (reviews, news, competitor comparisons) - NOT to replace first-hand data
+- When creating deliverables (presentations, reports, etc.), USE the content you extracted from the actual website
+- If you already have information from a previous browser action in this conversation, CHECK IT before browsing again
+
+### When NOT to Use
+- Simple static content extraction → use scrape_webpage first (faster)
+- API-based data retrieval → use appropriate API tools
+- For GitHub URLs → prefer using the gh CLI via Bash instead
+
+### browser_act - Natural Language Actions
+
+Describe what you want to do in natural language:
+- "click the login button"
+- "fill in email with user@example.com"
+- "scroll down"
+- "select 'Option A' from the dropdown"
+- "press Enter"
+
+**Supports:**
+- Clicking any element (buttons, links, images)
+- Form filling (text, numbers, emails, passwords)
+- Dropdown selection
+- Scrolling (up, down, to element)
+- Keyboard input (Enter, Tab, Escape)
+- File uploads (use filePath parameter)
+- iframes (use iframes parameter)
+
+### Screenshot Validation
+
+**IMPORTANT:** Every browser action returns a screenshot.
+- Whenever you intend to click on an element, consult the screenshot to determine coordinates
+- If a click failed to load, try adjusting your click location so the cursor tip falls on the element
+- Make sure to click buttons, links, icons with the cursor tip in the center of the element
+- Review screenshots after each action to verify expected results
+
+### Usage Pattern
+
+```
+# Navigate to site
+browser_navigate_to(url="https://example.com")
+
+# Perform actions
+browser_act(action="click the Sign In button")
+browser_act(action="fill in username with john@email.com")
+browser_act(action="fill in password with ***", variables={"password": "actual_pass"})
+browser_act(action="click Submit")
+
+# Extract data
+browser_extract_content(instruction="get all product names and prices")
+```
+
+### Important Notes
+- Screenshots auto-included with every action - use them to verify
+- Use variables parameter for sensitive data (not logged to LLM providers)
+- Include filePath for any file upload actions
+- Browser is sandboxed - safe for any site
+"""
 )
 class BrowserTool(SandboxToolsBase):
     """
@@ -305,7 +391,9 @@ class BrowserTool(SandboxToolsBase):
                         clean_result["screenshot_issue"] = f"Screenshot processing issue: {result['image_validation_error']}"
                     if result.get("image_upload_error"):
                         clean_result["screenshot_issue"] = f"Screenshot upload issue: {result['image_upload_error']}"
-                    clean_result["message_id"] = added_message.get("message_id")
+                    # Convert message_id to string to ensure JSON serialization works
+                    message_id = added_message.get("message_id")
+                    clean_result["message_id"] = str(message_id) if message_id else None
 
                     if clean_result.get("success"):
                         return self.success_response(clean_result)
@@ -339,16 +427,17 @@ class BrowserTool(SandboxToolsBase):
         "type": "function",
         "function": {
             "name": "browser_navigate_to",
-            "description": "Navigate to a specific url",
+            "description": "Navigate to a specific url. **🚨 PARAMETER NAMES**: Use EXACTLY this parameter name: `url` (REQUIRED).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "The url to navigate to"
+                        "description": "**REQUIRED** - The URL to navigate to. Example: 'https://example.com'"
                     }
                 },
-                "required": ["url"]
+                "required": ["url"],
+                "additionalProperties": False
             }
         }
     })
@@ -361,31 +450,32 @@ class BrowserTool(SandboxToolsBase):
         "type": "function",
         "function": {
             "name": "browser_act",
-            "description": "Perform any browser action using natural language description. CRITICAL: This tool automatically provides a screenshot with every action. For data entry actions (filling forms, entering text, selecting options), you MUST review the provided screenshot to verify that displayed values exactly match what was intended. Report mismatches immediately. CRITICAL FILE UPLOAD RULE: ANY action that involves clicking, interacting with, or locating upload buttons, file inputs, resume upload sections, or any element that might trigger a choose file dialog MUST include the filePath parameter with filePath. This includes actions like 'click upload button', 'locate resume section', 'find file input' etc. Always err on the side of caution - if there's any possibility the action might lead to a file dialog, include filePath. This prevents accidental file dialog triggers without proper file handling.",
+            "description": "Perform any browser action using natural language description. CRITICAL: This tool automatically provides a screenshot with every action. For data entry actions (filling forms, entering text, selecting options), you MUST review the provided screenshot to verify that displayed values exactly match what was intended. Report mismatches immediately. CRITICAL FILE UPLOAD RULE: ANY action that involves clicking, interacting with, or locating upload buttons, file inputs, resume upload sections, or any element that might trigger a choose file dialog MUST include the filePath parameter with filePath. This includes actions like 'click upload button', 'locate resume section', 'find file input' etc. Always err on the side of caution - if there's any possibility the action might lead to a file dialog, include filePath. This prevents accidental file dialog triggers without proper file handling. **🚨 PARAMETER NAMES**: Use EXACTLY these parameter names: `action` (REQUIRED), `variables` (optional), `iframes` (optional), `filePath` (optional).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "description": "The action to perform. Examples: 'click the login button', 'fill in the email field with %email%', 'scroll down to see more content', 'select option 2 from the dropdown', 'press Enter', 'go back', 'wait 5 seconds', 'click at coordinates 100,200', 'select United States from the country dropdown'"
+                        "description": "**REQUIRED** - The action to perform. Examples: 'click the login button', 'fill in the email field with %email%', 'scroll down to see more content', 'select option 2 from the dropdown', 'press Enter', 'go back', 'wait 5 seconds', 'click at coordinates 100,200', 'select United States from the country dropdown'"
                     },
                     "variables": {
                         "type": "object",
-                        "description": "Variables to use in the action. Variables in the action string are referenced using %variable_name%. These variables are NOT shared with LLM providers for security.",
+                        "description": "**OPTIONAL** - Variables to use in the action. Variables in the action string are referenced using %variable_name%. These variables are NOT shared with LLM providers for security. Default: {}.",
                         "additionalProperties": {"type": "string"},
                         "default": {}
                     },
                     "iframes": {
                         "type": "boolean",
-                        "description": "Whether to include iframe content in the action. Set to true if the target element is inside an iframe.",
+                        "description": "**OPTIONAL** - Whether to include iframe content in the action. Set to true if the target element is inside an iframe. Default: true.",
                         "default": True
                     },
                     "filePath": {
                         "type": "string",
-                        "description": "CRITICAL: REQUIRED for ANY action that might involve file uploads. This includes: clicking upload buttons, locating resume sections, finding file inputs, scrolling to upload areas, or any action that could potentially trigger a file dialog. Always include this parameter when dealing with upload-related elements to prevent accidental file dialog triggers. The tool will automatically handle the file upload after the action is performed.",
+                        "description": "**OPTIONAL** - CRITICAL: REQUIRED for ANY action that might involve file uploads. This includes: clicking upload buttons, locating resume sections, finding file inputs, scrolling to upload areas, or any action that could potentially trigger a file dialog. Always include this parameter when dealing with upload-related elements to prevent accidental file dialog triggers. The tool will automatically handle the file upload after the action is performed."
                     }
                 },
-                "required": ["action"]
+                "required": ["action"],
+                "additionalProperties": False
             }
         }
     })
@@ -401,21 +491,22 @@ class BrowserTool(SandboxToolsBase):
         "type": "function",
         "function": {
             "name": "browser_extract_content",
-            "description": "Extract structured content from the current page using Stagehand",
+            "description": "Extract structured content from the current page using Stagehand. **🚨 PARAMETER NAMES**: Use EXACTLY these parameter names: `instruction` (REQUIRED), `iframes` (optional).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "instruction": {
                         "type": "string",
-                        "description": "What content to extract (e.g., 'extract all product prices', 'get the main heading', 'extract apartment listings with address and price')"
+                        "description": "**REQUIRED** - What content to extract. Example: 'extract all product prices', 'get the main heading', 'extract apartment listings with address and price'"
                     },
                     "iframes": {
                         "type": "boolean",
-                        "description": "Whether to include iframe content in the extraction. Set to true if the target content is inside an iframe.",
+                        "description": "**OPTIONAL** - Whether to include iframe content in the extraction. Set to true if the target content is inside an iframe. Default: true.",
                         "default": True
                     }
                 },
-                "required": ["instruction"]
+                "required": ["instruction"],
+                "additionalProperties": False
             }
         }
     })
@@ -429,16 +520,18 @@ class BrowserTool(SandboxToolsBase):
         "type": "function",
         "function": {
             "name": "browser_screenshot",
-            "description": "Take a screenshot of the current page",
+            "description": "Take a screenshot of the current page. **🚨 PARAMETER NAMES**: Use EXACTLY this parameter name: `name` (optional).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Name for the screenshot",
+                        "description": "**OPTIONAL** - Name for the screenshot. Default: 'screenshot'.",
                         "default": "screenshot"
                     }
-                }
+                },
+                "required": [],
+                "additionalProperties": False
             }
         }
     })

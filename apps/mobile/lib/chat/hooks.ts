@@ -12,14 +12,15 @@ import {
   type UseMutationOptions,
   type UseQueryOptions,
 } from '@tanstack/react-query';
-import { API_URL, getAuthToken, getAuthHeaders } from '@/api/config';
+import { log } from '@/lib/logger';
+import { Share } from 'react-native';
+import { API_URL, FRONTEND_SHARE_URL, getAuthHeaders, getAuthToken } from '@/api/config';
 import type {
   Thread,
   Message,
   AgentRun,
   SendMessageInput,
-  InitiateAgentInput,
-  InitiateAgentResponse,
+  UnifiedAgentStartResponse,
   ActiveAgentRun,
 } from '@/api/types';
 
@@ -59,7 +60,8 @@ export function useThreads(
       const data = await res.json();
       return data.threads || [];
     },
-    staleTime: 5 * 60 * 1000,
+    staleTime: 30 * 1000, // 30 seconds - threads should refresh frequently
+    refetchOnWindowFocus: true,
     ...options,
   });
 }
@@ -77,7 +79,9 @@ export function useThread(
       return res.json();
     },
     enabled: !!threadId,
-    staleTime: 5 * 60 * 1000,
+    staleTime: 0, // Always refetch to get latest sandbox data
+    refetchOnMount: 'always', // Refetch sandbox on every mount
+    refetchOnWindowFocus: true, // Refetch when window gains focus
     ...options,
   });
 }
@@ -123,6 +127,44 @@ export function useDeleteThread(
     onSuccess: (_, threadId) => {
       queryClient.invalidateQueries({ queryKey: chatKeys.threads() });
       queryClient.removeQueries({ queryKey: chatKeys.thread(threadId) });
+    },
+    ...options,
+  });
+}
+
+export function useShareThread(
+  options?: UseMutationOptions<{ shareUrl: string }, Error, string>
+) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (threadId) => {
+      // Generate share URL immediately - it's deterministic
+      const shareUrl = `${FRONTEND_SHARE_URL}/share/${threadId}`;
+
+      // Open native share menu right away for instant UX
+      // Use message instead of url to prevent iOS duplication issue
+      await Share.share({
+        message: shareUrl,
+      });
+
+      // Make thread public in background (fire-and-forget)
+      getAuthHeaders().then((headers) => {
+        fetch(`${API_URL}/threads/${threadId}`, {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify({ is_public: true }),
+        }).then((res) => {
+          if (res.ok) {
+            queryClient.invalidateQueries({ queryKey: chatKeys.threads() });
+            queryClient.invalidateQueries({ queryKey: chatKeys.thread(threadId) });
+          }
+        }).catch((err) => {
+          log.error('Failed to make thread public:', err);
+        });
+      });
+
+      return { shareUrl };
     },
     ...options,
   });
@@ -187,36 +229,116 @@ export function useAddMessage(
   });
 }
 
-export function useStartAgent(
+export function useUnifiedAgentStart(
   options?: UseMutationOptions<
-    { agent_run_id: string; status: string },
+    { thread_id: string; agent_run_id: string; project_id?: string; sandbox_id?: string; status: string },
     Error,
-    { threadId: string; modelName?: string; agentId?: string }
+    { threadId?: string; prompt?: string; files?: Array<{ uri: string; name: string; type: string }>; modelName?: string; agentId?: string; threadMetadata?: Record<string, any> }
   >
 ) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async ({ threadId, modelName, agentId }) => {
-      const headers = await getAuthHeaders();
+    mutationFn: async ({ threadId, prompt, files, modelName, agentId, threadMetadata }) => {
+      const formData = new FormData();
+      
+      if (threadId) formData.append('thread_id', threadId);
+      if (prompt) formData.append('prompt', prompt);
+      if (modelName) formData.append('model_name', modelName);
+      if (agentId) formData.append('agent_id', agentId);
+      if (threadMetadata) formData.append('thread_metadata', JSON.stringify(threadMetadata));
+      
+      // Append files if present (uploaded directly with agent start)
+      if (files && files.length > 0) {
+        for (const file of files) {
+          formData.append('files', {
+            uri: file.uri,
+            name: file.name,
+            type: file.type || 'application/octet-stream',
+          } as any);
+        }
+      }
 
-      const body: any = {};
-      if (modelName) body.model_name = modelName;
-      if (agentId) body.agent_id = agentId;
+      const authHeaders = await getAuthHeaders();
+      const headers: Record<string, string> = {};
+      Object.entries(authHeaders).forEach(([key, value]) => {
+        if (key !== 'Content-Type' && typeof value === 'string') {
+          headers[key] = value;
+        }
+      });
 
-      const res = await fetch(`${API_URL}/thread/${threadId}/agent/start`, {
+      const res = await fetch(`${API_URL}/agent/start`, {
         method: 'POST',
         headers,
-        body: JSON.stringify(body),
+        body: formData,
       });
+
       if (!res.ok) {
-        const error = await res.text().catch(() => 'Unknown error');
-        throw new Error(`Failed to start agent: ${res.status} - ${error}`);
+        const errorText = await res.text().catch(() => 'Unknown error');
+        
+        if (res.status === 402) {
+          let errorDetail;
+          try {
+            errorDetail = JSON.parse(errorText);
+          } catch {
+            errorDetail = { detail: { message: 'Payment required' } };
+          }
+          
+          const detail = errorDetail.detail || errorDetail;
+          const errorCode = detail.error_code;
+          
+          // Handle concurrent agent run limit (AGENT_RUN_LIMIT_EXCEEDED)
+          if (errorCode === 'AGENT_RUN_LIMIT_EXCEEDED') {
+            const error: any = new Error(
+              detail.message || `Maximum of ${detail.limit || 1} concurrent agent runs allowed. You currently have ${detail.running_count || 0} running.`
+            );
+            error.code = 'AGENT_RUN_LIMIT_EXCEEDED';
+            error.status = 402;
+            error.detail = {
+              message: detail.message || `Maximum of ${detail.limit || 1} concurrent agent runs allowed. You currently have ${detail.running_count || 0} running.`,
+              running_thread_ids: detail.running_thread_ids || [],
+              running_count: detail.running_count || 0,
+              limit: detail.limit || 1,
+            };
+            throw error;
+          }
+          
+          // For other 402 errors, throw generic billing error
+          const error: any = new Error(detail.message || 'Payment required');
+          error.code = errorCode || 'BILLING_ERROR';
+          error.status = 402;
+          error.detail = detail;
+          throw error;
+        }
+        
+        if (res.status === 429) {
+          let errorDetail;
+          try {
+            errorDetail = JSON.parse(errorText);
+          } catch {
+            errorDetail = { detail: { message: 'Too many requests' } };
+          }
+          
+          const error: any = new Error(errorDetail.detail?.message || 'Rate limit exceeded');
+          error.code = 'RATE_LIMIT_EXCEEDED';
+          error.status = 429;
+          error.detail = errorDetail.detail;
+          throw error;
+        }
+        
+        throw new Error(`Failed to start agent: ${res.status} - ${errorText}`);
       }
+      
       return res.json();
     },
-    onSuccess: (_, variables) => {
-      queryClient.invalidateQueries({ queryKey: chatKeys.runs(variables.threadId) });
+    onSuccess: (data, variables) => {
+      // DON'T invalidate threads list - it causes race conditions where server
+      // returns stale data (replication lag) and overwrites our optimistic updates.
+      // The thread is already in cache via setQueriesData in useChat.
+      queryClient.invalidateQueries({ queryKey: chatKeys.runs(data.thread_id) });
+      if (variables.threadId) {
+        queryClient.invalidateQueries({ queryKey: chatKeys.runs(variables.threadId) });
+      }
     },
     ...options,
   });
@@ -229,31 +351,37 @@ export function useSendMessage(
     SendMessageInput
   >
 ) {
-  const addMessage = useAddMessage();
-  const startAgent = useStartAgent();
+  const unifiedAgentStart = useUnifiedAgentStart();
 
   return useMutation({
     mutationFn: async (input) => {
-      console.log('🚀 [useSendMessage] Step 1: Adding message to thread', input.threadId);
+      // MATCHES FRONTEND: Single call to /agent/start with prompt included
+      // Frontend does NOT call /messages/add separately - the agent start creates the message
+      log.log('🚀 [useSendMessage] Starting agent with prompt (single /agent/start call like frontend)', input.threadId);
 
-      const message = await addMessage.mutateAsync({
+      const agentRun = await unifiedAgentStart.mutateAsync({
         threadId: input.threadId,
-        message: input.message,
-      });
-
-      console.log('✅ [useSendMessage] Step 1 complete: Message added', message);
-      console.log('🚀 [useSendMessage] Step 2: Starting agent run');
-
-      const agentRun = await startAgent.mutateAsync({
-        threadId: input.threadId,
+        prompt: input.message, // Send message as prompt to /agent/start
         modelName: input.modelName,
         agentId: input.agentId,
+        files: input.files,
       });
 
-      console.log('✅ [useSendMessage] Step 2 complete: Agent started', agentRun);
+      log.log('✅ [useSendMessage] Agent started with prompt:', agentRun);
 
+      // The message is created by the backend when starting the agent
+      // Return a synthetic message object for compatibility
       return {
-        message,
+        message: {
+          message_id: `msg-${Date.now()}`,
+          thread_id: input.threadId,
+          type: 'user' as const,
+          content: input.message,
+          metadata: {},
+          is_llm_message: false,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        } as Message,
         agentRunId: agentRun.agent_run_id,
       };
     },
@@ -377,18 +505,26 @@ export function useActiveAgentRuns(
       try {
         const res = await fetch(`${API_URL}/agent-runs/active`, { headers });
         if (!res.ok) {
-          console.warn(`Failed to fetch active runs: ${res.status}`);
+          log.warn(`Failed to fetch active runs: ${res.status}`);
           return [];
         }
         const data = await res.json();
         return data.active_runs || [];
       } catch (error) {
-        console.error('Error fetching active runs:', error);
-        return [];
+        // IMPORTANT: Re-throw network errors so fetchQuery catches them for retry logic
+        // This allows retryLastMessage to detect network failures
+        log.error('Error fetching active runs:', error);
+        throw error;
       }
     },
-    staleTime: 5 * 1000,
-    refetchInterval: 10000,
+    // Don't retry on error for this query - let the UI handle retry
+    retry: false,
+    staleTime: 10 * 1000, // Cache for 10 seconds
+    refetchInterval: (query) => {
+      // Smart polling: only poll every 15 seconds if there are active runs
+      const hasActiveRuns = query.state.data && query.state.data.length > 0;
+      return hasActiveRuns ? 15000 : false;
+    },
     ...options,
   });
 }
@@ -437,44 +573,3 @@ export function useStopAgentRun(
     ...options,
   });
 }
-
-export function useInitiateAgent(
-  options?: UseMutationOptions<InitiateAgentResponse, Error, InitiateAgentInput>
-) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async (input) => {
-      const token = await getAuthToken();
-      if (!token) throw new Error('Authentication required');
-
-      const formData = new FormData();
-      formData.append('prompt', input.prompt);
-
-      if (input.agent_id) formData.append('agent_id', input.agent_id);
-      if (input.model_name) formData.append('model_name', input.model_name);
-      if (input.files?.length) {
-        input.files.forEach((file) => formData.append('files', file));
-      }
-
-      const res = await fetch(`${API_URL}/agent/initiate`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
-      });
-
-      if (!res.ok) {
-        const error = await res.text().catch(() => 'Unknown error');
-        throw new Error(`Failed to initiate agent: ${res.status} - ${error}`);
-      }
-
-      return res.json();
-    },
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: chatKeys.threads() });
-      queryClient.setQueryData(chatKeys.thread(data.thread_id), data);
-    },
-    ...options,
-  });
-}
-

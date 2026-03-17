@@ -34,11 +34,11 @@ _AgentPressTools_descriptions = {
     "sb_shell_tool": "Execute shell commands",
     # "sb_web_dev_tool": "Create and manage modern web applications with Next.js and shadcn/ui",  # DEACTIVATED
     "sb_expose_tool": "Expose local services to the internet",
+    "sb_git_sync": "Sync files and projects with Git repositories for version control and collaboration",
     "sb_vision_tool": "Analyze and understand images",
     "browser_tool": "Browse websites and interact with web pages",
     "web_search_tool": "Search the web for information",
     "sb_image_edit_tool": "Edit and manipulate images",
-    "data_providers_tool": "Access structured data from various providers",
 }
 
 
@@ -47,10 +47,10 @@ class AgentPressTools(str, Enum):
     SB_SHELL_TOOL = "sb_shell_tool"
     # SB_WEB_DEV_TOOL = "sb_web_dev_tool"  # DEACTIVATED
     SB_EXPOSE_TOOL = "sb_expose_tool"
+    SB_GIT_SYNC = "sb_git_sync"
     SB_VISION_TOOL = "sb_vision_tool"
     BROWSER_TOOL = "browser_tool"
     WEB_SEARCH_TOOL = "web_search_tool"
-    DATA_PROVIDERS_TOOL = "data_providers_tool"
 
     def get_description(self) -> str:
         global _AgentPressTools_descriptions

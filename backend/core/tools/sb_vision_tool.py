@@ -16,8 +16,9 @@ from svglib.svglib import svg2rlg
 from reportlab.graphics import renderPM
 import tempfile
 import requests
+import aiohttp
 from core.utils.config import config
-
+from core.utils.logger import logger
 # Add common image MIME types if mimetypes module is limited
 mimetypes.add_type("image/webp", ".webp")
 mimetypes.add_type("image/jpeg", ".jpg")
@@ -41,7 +42,48 @@ DEFAULT_PNG_COMPRESS_LEVEL = 6
     icon="Eye",
     color="bg-pink-100 dark:bg-pink-800/50",
     weight=40,
-    visible=True
+    visible=True,
+    usage_guide="""
+### VISUAL INPUT & IMAGE CONTEXT MANAGEMENT
+
+**CRITICAL: load_image is ONLY for actual IMAGE files. For PDFs and documents, use read_file instead.**
+
+**SUPPORTED FILE TYPES (IMAGES ONLY):**
+- JPG, JPEG, PNG, GIF, WEBP, SVG
+- ❌ PDFs are NOT images - use read_file with file_path "uploads/document.pdf" instead
+- ❌ Documents (doc, docx, txt) are NOT images - use read_file instead
+- ❌ Data files (csv, json) are NOT images - use read_file instead
+
+**HOW TO LOAD IMAGES:**
+- Provide the relative path to the image in the `/workspace` directory
+- Example: use load_image with file_path "uploads/photo.jpg"
+- ALWAYS use this tool when visual information from an IMAGE file is necessary
+- Maximum file size: 10 MB
+
+**IMAGE CONTEXT MANAGEMENT - HARD LIMIT:**
+- **Maximum 3 images can be loaded in context at any time**
+- Images consume significant context tokens (1000+ tokens per image)
+- You MUST manage image context intelligently
+
+**WHEN TO KEEP IMAGES LOADED:**
+- User wants to recreate, reproduce, or rebuild what's in the image
+- Writing code based on image content (UI from screenshots, diagrams, wireframes)
+- Editing, modifying, or iterating on the image content
+- Task requires ACTIVE VISUAL REFERENCE
+- In the middle of a multi-step task involving the image
+
+**WHEN TO CLEAR IMAGES (use clear_images_from_context tool):**
+- Task is complete and images no longer needed
+- User moves to different topic unrelated to images
+- You only needed to extract information/text from images (already done)
+- Reached the 3-image limit and need to load new images
+
+**CRITICAL WARNINGS:**
+- HARD LIMIT: Cannot load more than 3 images at any time
+- Clearing too early while working on image-based tasks = incomplete/failed work
+- Keep images loaded during active work, clear when done
+- Image files remain in sandbox - clearing only removes from conversation context
+"""
 )
 class SandboxVisionTool(SandboxToolsBase):
     """Tool for allowing the agent to 'see' images within the sandbox."""
@@ -51,7 +93,7 @@ class SandboxVisionTool(SandboxToolsBase):
         self.thread_id = thread_id
         # Make thread_manager accessible within the tool instance
         self.thread_manager = thread_manager
-        self.db = DBConnection()
+        self.db = thread_manager.db if thread_manager else DBConnection()
 
     async def convert_svg_with_sandbox_browser(self, svg_full_path: str) -> Tuple[bytes, str]:
         """Convert SVG to PNG using sandbox browser API for better rendering support.
@@ -241,36 +283,40 @@ class SandboxVisionTool(SandboxToolsBase):
         parsed_url = urlparse(file_path)
         return parsed_url.scheme in ('http', 'https')
     
-    def download_image_from_url(self, url: str) -> Tuple[bytes, str]:
-        """Download image from a URL"""
+    async def download_image_from_url(self, url: str) -> Tuple[bytes, str]:
+        """Download image from a URL (async using aiohttp to avoid blocking event loop)"""
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0"  # Some servers block default Python
             }
+            timeout = aiohttp.ClientTimeout(total=10)
 
-            # HEAD request to get the image size
-            head_response = requests.head(url, timeout=10, headers=headers, stream=True)
-            head_response.raise_for_status()
-            
-            # Check content length
-            content_length = int(head_response.headers.get('Content-Length'))
-            if content_length and content_length > MAX_IMAGE_SIZE:
-                raise Exception(f"Image is too large ({(content_length)/(1024*1024):.2f}MB) for the maximum allowed size of {MAX_IMAGE_SIZE/(1024*1024):.2f}MB")
-            
-            # Download the image
-            response = requests.get(url, timeout=10, headers=headers, stream=True)
-            response.raise_for_status()
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                # HEAD request to get the image size
+                async with session.head(url, headers=headers) as head_response:
+                    head_response.raise_for_status()
+                    
+                    # Check content length
+                    content_length = head_response.headers.get('Content-Length')
+                    if content_length:
+                        content_length = int(content_length)
+                        if content_length > MAX_IMAGE_SIZE:
+                            raise Exception(f"Image is too large ({(content_length)/(1024*1024):.2f}MB) for the maximum allowed size of {MAX_IMAGE_SIZE/(1024*1024):.2f}MB")
+                
+                # Download the image
+                async with session.get(url, headers=headers) as response:
+                    response.raise_for_status()
 
-            image_bytes = response.content
-            if len(image_bytes) > MAX_IMAGE_SIZE:
-                raise Exception(f"Downloaded image is too large ({(len(image_bytes))/(1024*1024):.2f}MB). Maximum allowed size of {MAX_IMAGE_SIZE/(1024*1024):.2f}MB")
+                    image_bytes = await response.read()
+                    if len(image_bytes) > MAX_IMAGE_SIZE:
+                        raise Exception(f"Downloaded image is too large ({(len(image_bytes))/(1024*1024):.2f}MB). Maximum allowed size of {MAX_IMAGE_SIZE/(1024*1024):.2f}MB")
 
-            # Get MIME type
-            mime_type = response.headers.get('Content-Type')
-            if not mime_type or not mime_type.startswith('image/'):
-                raise Exception(f"URL does not point to an image (Content-Type: {mime_type}): {url}")
-            
-            return image_bytes, mime_type
+                    # Get MIME type
+                    mime_type = response.headers.get('Content-Type')
+                    if not mime_type or not mime_type.startswith('image/'):
+                        raise Exception(f"URL does not point to an image (Content-Type: {mime_type}): {url}")
+                    
+                    return image_bytes, mime_type
         except Exception as e:
             return self.fail_response(f"Failed to download image from URL: {str(e)}")
     
@@ -282,16 +328,17 @@ class SandboxVisionTool(SandboxToolsBase):
 
 ⚠️ HARD LIMIT: Maximum 3 images can be loaded in context at any time. Images consume 1000+ tokens each.
 
-Images remain in the sandbox and can be loaded again anytime. SVG files are automatically converted to PNG.""",
+Images remain in the sandbox and can be loaded again anytime. SVG files are automatically converted to PNG. **🚨 PARAMETER NAMES**: Use EXACTLY this parameter name: `file_path` (REQUIRED).""",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Either a relative path to the image file within the /workspace directory (e.g., 'screenshots/image.png') or a URL to an image (e.g., 'https://example.com/image.jpg'). Supported formats: JPG, PNG, GIF, WEBP, SVG. Max size: 10MB."
+                        "description": "**REQUIRED** - Either a relative path to the image file within the /workspace directory (e.g., 'screenshots/image.png') or a URL to an image (e.g., 'https://example.com/image.jpg'). Supported formats: JPG, PNG, GIF, WEBP, SVG. Max size: 10MB."
                     }
                 },
-                "required": ["file_path"]
+                "required": ["file_path"],
+                "additionalProperties": False
             }
         }
     })
@@ -301,7 +348,7 @@ Images remain in the sandbox and can be loaded again anytime. SVG files are auto
             is_url = self.is_url(file_path)
             if is_url:
                 try:
-                    image_bytes, mime_type = self.download_image_from_url(file_path)
+                    image_bytes, mime_type = await self.download_image_from_url(file_path)
                     original_size = len(image_bytes)
                     cleaned_path = file_path
                 except Exception as e:
@@ -418,41 +465,40 @@ Images remain in the sandbox and can be loaded again anytime. SVG files are auto
             # Check current image count in context (enforce 3-image limit)
             current_image_count = await self._count_images_in_context()
             if current_image_count >= 3:
-                return self.fail_response(
-                    f"Cannot load image '{cleaned_path}': Maximum limit of 3 images in context reached. "
-                    f"You currently have {current_image_count} images loaded. Use a tool to clear old images first."
-                )
+                # Auto-clear all images to make room for new ones
+                cleared = await self._clear_all_images()
+                logger.info(f"[LoadImage] Auto-cleared {cleared} image(s) to make room (was {current_image_count}/3)")
+                current_image_count = 0
             
-            # Add the image to the thread as an image_context message with multi-modal content
-            # This allows the LLM to actually "see" the image
-            message_content = {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": f"[Image loaded from '{cleaned_path}']"},
-                    {"type": "image_url", "image_url": {"url": public_url}}
-                ]
-            }
+            # NOTE: We do NOT save image_context here anymore!
+            # Instead, we return the image data in the result, and the response_processor
+            # will save the image_context AFTER the tool result is saved.
+            # This ensures proper message ordering (tool_call -> tool_result -> image_context).
             
-            await self.thread_manager.add_message(
-                thread_id=self.thread_id,
-                type="image_context",
-                content=message_content,
-                is_llm_message=True,
-                metadata={
-                    "file_path": cleaned_path,
-                    "mime_type": compressed_mime_type,
-                    "original_size": original_size,
-                    "compressed_size": len(compressed_bytes)
-                }
-            )
+            logger.info(f"[LoadImage] Prepared '{cleaned_path}' for context (will be saved after tool result)")
             
-            print(f"[LoadImage] Added image to context. Current count: {current_image_count + 1}/3")
-            
-            # Return structured output
+            # Return structured output with _image_context_data for deferred saving
             result_data = {
-                "message": f"Successfully loaded image '{cleaned_path}' into context (reduced from {original_size/1024:.1f}KB to {len(compressed_bytes)/1024:.1f}KB). Image {current_image_count + 1}/3 in context.",
+                "message": f"Successfully loaded image '{cleaned_path}' into context (reduced from {original_size/1024:.1f}KB to {len(compressed_bytes)/1024:.1f}KB).",
                 "file_path": cleaned_path,
-                "image_url": public_url
+                "image_url": public_url,
+                # This special key tells response_processor to save image_context after tool result
+                "_image_context_data": {
+                    "thread_id": self.thread_id,
+                    "message_content": {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": f"[Image loaded from '{cleaned_path}']"},
+                            {"type": "image_url", "image_url": {"url": public_url}}
+                        ]
+                    },
+                    "metadata": {
+                        "file_path": cleaned_path,
+                        "mime_type": compressed_mime_type,
+                        "original_size": original_size,
+                        "compressed_size": len(compressed_bytes)
+                    }
+                }
             }
             
             return self.success_response(result_data)
@@ -463,70 +509,24 @@ Images remain in the sandbox and can be loaded again anytime. SVG files are auto
     async def _count_images_in_context(self) -> int:
         """Count how many image_context messages are currently in the conversation."""
         try:
-            messages = await self.thread_manager.get_messages(thread_id=self.thread_id)
+            client = await self.db.client
+            result = await client.table('messages').select('message_id').eq('thread_id', self.thread_id).eq('type', 'image_context').execute()
             
-            # Count messages with type "image_context"
-            image_count = sum(1 for msg in messages if msg.get("type") == "image_context")
-            
-            return image_count
+            return len(result.data) if result.data else 0
         except Exception as e:
             print(f"[LoadImage] Error counting images in context: {e}")
             return 0
     
-    async def _clear_images_from_context(self) -> int:
+    async def _clear_all_images(self) -> int:
         """Remove all image_context messages from the thread."""
         try:
-            messages = await self.thread_manager.get_messages(thread_id=self.thread_id)
-            
-            # Delete messages with type "image_context"
-            deleted_count = 0
-            for msg in messages:
-                if msg.get("type") == "image_context":
-                    await self.thread_manager.delete_message(
-                        thread_id=self.thread_id,
-                        message_id=msg["message_id"]
-                    )
-                    deleted_count += 1
-            
-            return deleted_count
+            client = await self.db.client
+            result = await client.table('messages').delete().eq('thread_id', self.thread_id).eq('type', 'image_context').execute()
+            return len(result.data) if result.data else 0
         except Exception as e:
-            print(f"[LoadImage] Error clearing images from context: {e}")
+            print(f"[LoadImage] Error clearing images: {e}")
             return 0
 
-    @openapi_schema({
-        "type": "function",
-        "function": {
-            "name": "clear_images_from_context",
-            "description": """Removes all images from conversation context to free up slots for new images.
-
-⚠️ HARD LIMIT: Maximum 3 images allowed in context at any time.
-
-Call this when you need to load new images but have reached the limit.""",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }
-    })
-    async def clear_images_from_context(self) -> ToolResult:
-        """Removes all image_context messages from the current thread."""
-        try:
-            await self._ensure_sandbox()
-            
-            deleted_count = await self._clear_images_from_context()
-            
-            if deleted_count > 0:
-                return self.success_response(
-                    f"Successfully cleared {deleted_count} image(s) from conversation context. "
-                    f"You can now load up to 3 new images."
-                )
-            else:
-                return self.success_response("No images found in conversation context to clear.")
-                
-        except Exception as e:
-            return self.fail_response(f"Failed to clear images from context: {str(e)}")
- 
     # @openapi_schema({
     #     "type": "function",
     #     "function": {

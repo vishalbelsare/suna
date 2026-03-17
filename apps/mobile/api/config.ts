@@ -1,52 +1,76 @@
-/**
- * API Configuration
- * Simple config for API requests
- */
-
 import { Platform } from 'react-native';
 import { supabase } from './supabase';
+import { ENV_MODE, EnvMode } from '@/lib/utils/env-config';
+import { log } from '@/lib/logger';
 
-// Backend URL from environment
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 'http://localhost:8000/api';
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 'http://localhost:8000/v1';
 
-/**
- * Get the correct server URL based on platform
- */
+const FRONTEND_URL = process.env.EXPO_PUBLIC_FRONTEND_URL || '';
+
 export function getServerUrl(): string {
   let url = BACKEND_URL;
 
   if (Platform.OS === 'web') {
+    log.log('📡 Using backend URL (web):', url);
     return url;
   }
 
-  // For React Native, replace localhost with the correct IP
   if (url.includes('localhost') || url.includes('127.0.0.1')) {
-    // iOS Simulator: Use localhost (works on newer versions)
-    // Android Emulator: Use 10.0.2.2 (special alias to host machine)
-    // Physical device: Use actual machine IP from EXPO_PUBLIC_DEV_HOST
     const devHost = process.env.EXPO_PUBLIC_DEV_HOST || (
       Platform.OS === 'ios' ? 'localhost' : '10.0.2.2'
     );
     url = url.replace('localhost', devHost).replace('127.0.0.1', devHost);
-    console.log('📡 Using backend URL:', url);
+    log.log('📡 Using backend URL (localhost):', url);
+  } else {
+    log.log('📡 Using backend URL:', url);
   }
 
   return url;
 }
 
-export const API_URL = getServerUrl();
-
 /**
- * Get authentication token from Supabase
+ * Get the frontend URL based on environment
+ * Used for auth redirects, sharing links, etc.
+ *
+ * Priority:
+ * 1. EXPO_PUBLIC_FRONTEND_URL if set (explicit override)
+ * 2. Infer from backend URL (if backend is production, frontend should be too)
+ * 3. Environment-based defaults (staging by default for Expo apps)
  */
+export function getFrontendUrl(): string {
+  // If explicitly set, use that
+  if (FRONTEND_URL) {
+    return FRONTEND_URL.replace(/\/$/, ''); // Remove trailing slash
+  }
+
+  // Infer from backend URL - if backend is production, frontend should be too
+  if (BACKEND_URL.includes('api.kortix.com') || BACKEND_URL.includes('api.suna.so')) {
+    return 'https://kortix.com';
+  }
+  if (BACKEND_URL.includes('staging.api') || BACKEND_URL.includes('staging-api')) {
+    return 'https://staging.kortix.com';
+  }
+
+  // Fall back to environment-based defaults
+  switch (ENV_MODE) {
+    case EnvMode.PRODUCTION:
+      return 'https://kortix.com';
+    case EnvMode.STAGING:
+      return 'https://staging.kortix.com';
+    case EnvMode.LOCAL:
+    default:
+      return 'http://localhost:3000';
+  }
+}
+
+export const API_URL = getServerUrl();
+export const FRONTEND_SHARE_URL = getFrontendUrl();
+
 export async function getAuthToken(): Promise<string | null> {
   const { data: { session } } = await supabase.auth.getSession();
   return session?.access_token || null;
 }
 
-/**
- * Get auth headers for API requests
- */
 export async function getAuthHeaders(): Promise<HeadersInit> {
   const token = await getAuthToken();
   

@@ -1,245 +1,383 @@
-"""
-Subscription limit checking utilities.
-
-Handles checking various limits based on user tier:
-- Agent run limits
-- Agent count limits  
-- Project count limits
-"""
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
 from core.utils.logger import logger
 from core.utils.config import config
 from core.utils.cache import Cache
+from core.utils import limits_repo
 
 
-async def check_agent_run_limit(client, account_id: str) -> Dict[str, Any]:
-    """
-    Check if the account has reached the limit of parallel agent runs within the past 24 hours.
-    
-    Args:
-        client: Database client
-        account_id: Account ID to check
-        
-    Returns:
-        Dict with 'can_start' (bool), 'running_count' (int), 'running_thread_ids' (list)
-        
-    Note: This function does not use caching to ensure real-time limit checks.
-    """
+def _get_free_tier_defaults() -> Dict[str, Any]:
     try:
-        # Calculate 24 hours ago
-        twenty_four_hours_ago = datetime.now(timezone.utc) - timedelta(hours=24)
-        twenty_four_hours_ago_iso = twenty_four_hours_ago.isoformat()
-        
-        logger.debug(f"Checking agent run limit for account {account_id} since {twenty_four_hours_ago_iso}")
-        
-        # Get all threads for this account
-        threads_result = await client.table('threads').select('thread_id').eq('account_id', account_id).execute()
-        
-        if not threads_result.data:
-            logger.debug(f"No threads found for account {account_id}")
+        from core.billing.shared.config import TIERS
+        free_tier = TIERS.get('free')
+        if free_tier:
             return {
-                'can_start': True,
-                'running_count': 0,
-                'running_thread_ids': []
+                'name': 'free',
+                'concurrent_runs': free_tier.concurrent_runs,
+                'thread_limit': free_tier.thread_limit,
+                'project_limit': free_tier.project_limit,
+                'custom_workers_limit': free_tier.custom_workers_limit,
+                'scheduled_triggers_limit': free_tier.scheduled_triggers_limit,
+                'app_triggers_limit': free_tier.app_triggers_limit,
             }
-        
-        thread_ids = [thread['thread_id'] for thread in threads_result.data]
-        logger.debug(f"Found {len(thread_ids)} threads for account {account_id}")
-        
-        # Query for running agent runs within the past 24 hours for these threads
-        from core.utils.query_utils import batch_query_in
-        
-        running_runs = await batch_query_in(
-            client=client,
-            table_name='agent_runs',
-            select_fields='id, thread_id, started_at',
-            in_field='thread_id',
-            in_values=thread_ids,
-            additional_filters={
-                'status': 'running',
-                'started_at_gte': twenty_four_hours_ago_iso
-            }
-        )
-        
-        running_count = len(running_runs)
-        running_thread_ids = [run['thread_id'] for run in running_runs]
-        
-        logger.debug(f"Account {account_id} has {running_count} running agent runs in the past 24 hours")
-        
-        result = {
-            'can_start': running_count < config.MAX_PARALLEL_AGENT_RUNS,
-            'running_count': running_count,
-            'running_thread_ids': running_thread_ids
+    except Exception:
+        pass
+
+    return {
+        'name': 'free',
+        'concurrent_runs': 1,
+        'thread_limit': 10,
+        'project_limit': 20,
+        'custom_workers_limit': 0,
+        'scheduled_triggers_limit': 0,
+        'app_triggers_limit': 0,
+    }
+
+
+async def _get_tier_info_if_needed(account_id: str, tier_info: Optional[Dict] = None) -> Dict:
+    if tier_info is not None:
+        return tier_info
+    
+    try:
+        from core.agents.pipeline.slot_manager import get_tier_limits
+        limits = await get_tier_limits(account_id)
+        defaults = _get_free_tier_defaults()
+        return {
+            'name': limits.get('name', 'free'),
+            'concurrent_runs': limits.get('concurrent_runs', defaults['concurrent_runs']),
+            'thread_limit': limits.get('thread_limit', defaults['thread_limit']),
+            'project_limit': limits.get('project_limit', defaults['project_limit']),
+            'custom_workers_limit': limits.get('custom_workers_limit', defaults['custom_workers_limit']),
+            'scheduled_triggers_limit': limits.get('scheduled_triggers_limit', defaults['scheduled_triggers_limit']),
+            'app_triggers_limit': limits.get('app_triggers_limit', defaults['app_triggers_limit']),
         }
-        return result
+    except Exception as e:
+        logger.warning(f"Could not get tier for {account_id}: {e}, using defaults")
+        return _get_free_tier_defaults()
+
+
+async def check_agent_run_limit(account_id: str, tier_info: Optional[Dict] = None, client=None) -> Dict[str, Any]:
+    try:
+        from core.agents.pipeline.slot_manager import get_count, get_tier_limits
+        
+        tier = await get_tier_limits(account_id)
+        concurrent_runs_limit = tier.get('concurrent_runs', 1)
+        tier_name = tier.get('name', 'free')
+        
+        running_count = await get_count(account_id)
+        
+        return {
+            'can_start': running_count < concurrent_runs_limit,
+            'running_count': running_count,
+            'running_thread_ids': [],
+            'limit': concurrent_runs_limit,
+            'tier_name': tier_name
+        }
 
     except Exception as e:
-        logger.error(f"Error checking agent run limit for account {account_id}: {str(e)}")
-        # In case of error, allow the run to proceed but log the error
+        logger.error(f"Error checking agent run limit for {account_id}: {e}")
         return {
             'can_start': True,
             'running_count': 0,
-            'running_thread_ids': []
+            'running_thread_ids': [],
+            'limit': 1,
+            'tier_name': 'free'
         }
 
 
-async def check_agent_count_limit(client, account_id: str) -> Dict[str, Any]:
-    """
-    Check if a user can create more agents based on their subscription tier.
-    
-    Args:
-        client: Database client
-        account_id: Account ID to check
-        
-    Returns:
-        Dict containing:
-        - can_create: bool - whether user can create another agent
-        - current_count: int - current number of custom agents (excluding Suna defaults)
-        - limit: int - maximum agents allowed for this tier
-        - tier_name: str - subscription tier name
-    
-    Note: This function does not use caching to ensure real-time agent counts.
-    """
+async def check_agent_count_limit(account_id: str, tier_info: Optional[Dict] = None, client=None) -> Dict[str, Any]:
     try:
-        # In local mode, allow practically unlimited custom agents
         if config.ENV_MODE.value == "local":
             return {
                 'can_create': True,
-                'current_count': 0,  # Return 0 to avoid showing any limit warnings
-                'limit': 999999,     # Practically unlimited
+                'current_count': 0,
+                'limit': 999999,
                 'tier_name': 'local'
             }
         
-        # Always query fresh data from database to avoid stale cache issues
-        agents_result = await client.table('agents').select('agent_id, metadata').eq('account_id', account_id).execute()
+        tier = await _get_tier_info_if_needed(account_id, tier_info)
+        tier_name = tier.get('name', 'free')
+        agent_limit = tier.get('custom_workers_limit', 1)
         
-        non_suna_agents = []
-        for agent in agents_result.data or []:
-            metadata = agent.get('metadata', {}) or {}
-            is_suna_default = metadata.get('is_suna_default', False)
-            if not is_suna_default:
-                non_suna_agents.append(agent)
-                
-        current_count = len(non_suna_agents)
-        logger.debug(f"Account {account_id} has {current_count} custom agents (excluding Suna defaults)")
-        
-        try:
-            from core.billing import subscription_service
-            tier_info = await subscription_service.get_user_subscription_tier(account_id)
-            tier_name = tier_info['name']
-            logger.debug(f"Account {account_id} subscription tier: {tier_name}")
-        except Exception as billing_error:
-            logger.warning(f"Could not get subscription tier for {account_id}: {str(billing_error)}, defaulting to free")
-            tier_name = 'free'
-        
-        agent_limit = config.AGENT_LIMITS.get(tier_name, config.AGENT_LIMITS['free'])
-        
+        current_count = await limits_repo.count_user_agents(account_id)
         can_create = current_count < agent_limit
         
-        result = {
+        logger.debug(f"Account {account_id} has {current_count}/{agent_limit} agents (tier: {tier_name})")
+        
+        return {
             'can_create': can_create,
             'current_count': current_count,
             'limit': agent_limit,
             'tier_name': tier_name
         }
         
-        logger.debug(f"Account {account_id} has {current_count}/{agent_limit} agents (tier: {tier_name}) - can_create: {can_create}")
-        
-        return result
-        
     except Exception as e:
-        logger.error(f"Error checking agent count limit for account {account_id}: {str(e)}", exc_info=True)
+        logger.error(f"Error checking agent count limit for {account_id}: {e}")
         return {
             'can_create': True,
             'current_count': 0,
-            'limit': config.AGENT_LIMITS['free'],
+            'limit': 1,
             'tier_name': 'free'
         }
 
 
-async def check_project_count_limit(client, account_id: str) -> Dict[str, Any]:
-    """
-    Check if a user can create more projects based on their subscription tier.
-    
-    Args:
-        client: Database client
-        account_id: Account ID to check
-        
-    Returns:
-        Dict containing:
-        - can_create: bool - whether user can create another project
-        - current_count: int - current number of projects
-        - limit: int - maximum projects allowed for this tier
-        - tier_name: str - subscription tier name
-    
-    Note: This function does not use caching to ensure real-time project counts,
-    preventing issues where deleted projects aren't immediately reflected in limits.
-    """
+async def check_project_count_limit(account_id: str, tier_info: Optional[Dict] = None, client=None) -> Dict[str, Any]:
     try:
-        # In local mode, allow practically unlimited projects
-        if config.ENV_MODE.value == "local":
+        from core.agents.pipeline.slot_manager import check_project_limit as sm_check_project_limit
+        
+        result = await sm_check_project_limit(account_id)
+        tier = await _get_tier_info_if_needed(account_id, tier_info)
+        
+        return {
+            'can_create': result.allowed,
+            'current_count': result.current_count,
+            'limit': result.limit,
+            'tier_name': tier.get('name', 'free')
+        }
+        
+    except Exception as e:
+        logger.error(f"Error checking project count limit for {account_id}: {e}")
+        return {
+            'can_create': True,
+            'current_count': 0,
+            'limit': 2,
+            'tier_name': 'free'
+        }
+
+
+async def check_trigger_limit(
+    account_id: str, 
+    agent_id: str = None, 
+    trigger_type: str = None, 
+    tier_info: Optional[Dict] = None,
+    client=None
+) -> Dict[str, Any]:
+    try:
+        tier = await _get_tier_info_if_needed(account_id, tier_info)
+        tier_name = tier.get('name', 'free')
+        scheduled_limit = tier.get('scheduled_triggers_limit', 1)
+        app_limit = tier.get('app_triggers_limit', 2)
+        
+        if agent_id is None or trigger_type is None:
+            trigger_counts = await limits_repo.count_all_triggers_for_account(account_id)
+            scheduled_count = trigger_counts.get("scheduled", 0)
+            app_count = trigger_counts.get("app", 0)
+            
             return {
-                'can_create': True,
-                'current_count': 0,  # Return 0 to avoid showing any limit warnings
-                'limit': 999999,     # Practically unlimited
-                'tier_name': 'local'
+                'scheduled': {
+                    'current_count': scheduled_count,
+                    'limit': scheduled_limit,
+                    'can_create': scheduled_count < scheduled_limit
+                },
+                'app': {
+                    'current_count': app_count,
+                    'limit': app_limit,
+                    'can_create': app_count < app_limit
+                },
+                'tier_name': tier_name
             }
         
-        try:
-            result = await Cache.get(f"project_count_limit:{account_id}")
-            if result:
-                logger.debug(f"Cache hit for project count limit: {account_id}")
-                return result
-        except Exception as cache_error:
-            logger.warning(f"Cache read failed for project count limit {account_id}: {str(cache_error)}")
-
-        projects_result = await client.table('projects').select('project_id').eq('account_id', account_id).execute()
-        current_count = len(projects_result.data or [])
-        logger.debug(f"Account {account_id} has {current_count} projects (real-time count)")
+        agent_exists = await limits_repo.check_agent_exists(agent_id, account_id)
+        if not agent_exists:
+            return {
+                'can_create': False,
+                'current_count': 0,
+                'limit': 0,
+                'tier_name': tier_name,
+                'error': 'Worker not found or access denied'
+            }
         
-        try:
-            credit_result = await client.table('credit_accounts').select('tier').eq('account_id', account_id).single().execute()
-            tier_name = credit_result.data.get('tier', 'free') if credit_result.data else 'free'
-            logger.debug(f"Account {account_id} credit tier: {tier_name}")
-        except Exception as credit_error:
-            try:
-                logger.debug(f"Trying user_id fallback for account {account_id}")
-                credit_result = await client.table('credit_accounts').select('tier').eq('user_id', account_id).single().execute()
-                tier_name = credit_result.data.get('tier', 'free') if credit_result.data else 'free'
-                logger.debug(f"Account {account_id} credit tier (via fallback): {tier_name}")
-            except:
-                logger.debug(f"No credit account for {account_id}, defaulting to free tier")
-                tier_name = 'free'
+        trigger_counts = await limits_repo.count_agent_triggers(agent_id)
+        scheduled_count = trigger_counts["scheduled"]
+        app_count = trigger_counts["app"]
         
-        from core.billing.config import get_project_limit
-        project_limit = get_project_limit(tier_name)
-        can_create = current_count < project_limit
+        if trigger_type == 'scheduled':
+            can_create = scheduled_count < scheduled_limit
+            current_count = scheduled_count
+            limit = scheduled_limit
+        else:
+            can_create = app_count < app_limit
+            current_count = app_count
+            limit = app_limit
         
-        result = {
+        return {
             'can_create': can_create,
             'current_count': current_count,
-            'limit': project_limit,
+            'limit': limit,
             'tier_name': tier_name
         }
         
-        logger.debug(f"Account {account_id} has {current_count}/{project_limit} projects (tier: {tier_name}) - can_create: {can_create}")
-        
-        # Cache for 1 minute - balance between staleness and DB load
-        try:
-            await Cache.set(f"project_count_limit:{account_id}", result, ttl=60)
-        except Exception as cache_error:
-            logger.warning(f"Cache write failed for project count limit {account_id}: {str(cache_error)}")
-        
-        return result
-        
     except Exception as e:
-        logger.error(f"Error checking project count limit for account {account_id}: {str(e)}", exc_info=True)
-        from core.billing.config import get_project_limit
+        logger.error(f"Error checking trigger limit for {account_id}: {e}")
         return {
-            'can_create': True,
-            'current_count': 0,
-            'limit': get_project_limit('free'),
+            'scheduled': {'current_count': 0, 'limit': 1, 'can_create': True},
+            'app': {'current_count': 0, 'limit': 2, 'can_create': True},
             'tier_name': 'free'
         }
 
+
+async def check_custom_mcp_limit(account_id: str, tier_info: Optional[Dict] = None, client=None) -> Dict[str, Any]:
+    try:
+        tier = await _get_tier_info_if_needed(account_id, tier_info)
+        tier_name = tier.get('name', 'free')
+        worker_limit = tier.get('custom_workers_limit', 0)
+        
+        total_custom_mcps = await limits_repo.count_custom_mcps_for_account(account_id)
+        can_create = total_custom_mcps < worker_limit
+        
+        logger.debug(f"Account {account_id} has {total_custom_mcps}/{worker_limit} custom MCPs (tier: {tier_name})")
+        
+        return {
+            'can_create': can_create,
+            'current_count': total_custom_mcps,
+            'limit': worker_limit,
+            'tier_name': tier_name
+        }
+        
+    except Exception as e:
+        logger.error(f"Error checking custom MCP limit for {account_id}: {e}")
+        return {
+            'can_create': True,
+            'current_count': 0,
+            'limit': 0,
+            'tier_name': 'free'
+        }
+
+
+async def check_thread_limit(account_id: str, tier_info: Optional[Dict] = None, client=None) -> Dict[str, Any]:
+    try:
+        from core.agents.pipeline.slot_manager import check_thread_limit as sm_check_thread_limit
+        
+        result = await sm_check_thread_limit(account_id)
+        tier = await _get_tier_info_if_needed(account_id, tier_info)
+        
+        return {
+            'can_create': result.allowed,
+            'current_count': result.current_count,
+            'limit': result.limit,
+            'tier_name': tier.get('name', 'free')
+        }
+        
+    except Exception as e:
+        logger.error(f"Error checking thread limit for {account_id}: {e}")
+        return {
+            'can_create': True,
+            'current_count': 0,
+            'limit': 2,
+            'tier_name': 'free'
+        }
+
+
+async def get_all_limits_fast(account_id: str, tier_info: Dict) -> Dict[str, Any]:
+    import time
+    import asyncio
+    t_start = time.time()
+
+    tier_name = tier_info.get('name', 'free')
+
+    thread_limit = tier_info.get('thread_limit', 2)
+    project_limit = tier_info.get('project_limit', 2)
+    agent_limit = tier_info.get('custom_workers_limit', 0)
+    concurrent_limit = tier_info.get('concurrent_runs', 1)
+    custom_mcp_limit = tier_info.get('custom_workers_limit', 0)
+    scheduled_trigger_limit = tier_info.get('scheduled_triggers_limit', 0)
+    app_trigger_limit = tier_info.get('app_triggers_limit', 0)
+
+    # Try to get thread/project counts from Redis cache first (slot_manager maintains these)
+    from core.services import redis as redis_service
+    thread_count_cached = None
+    project_count_cached = None
+
+    try:
+        thread_key = f"thread_count:{account_id}"
+        project_key = f"project_count:{account_id}"
+        thread_val, project_val = await asyncio.gather(
+            redis_service.get(thread_key),
+            redis_service.get(project_key),
+            return_exceptions=True
+        )
+        if isinstance(thread_val, str) or isinstance(thread_val, bytes):
+            thread_count_cached = int(thread_val)
+        if isinstance(project_val, str) or isinstance(project_val, bytes):
+            project_count_cached = int(project_val)
+    except Exception:
+        pass
+
+    # If we have cached counts, use them and skip the expensive DB query for threads/projects
+    if thread_count_cached is not None and project_count_cached is not None:
+        # Only fetch the counts we don't have cached (agents, running_runs, custom_mcps, triggers)
+        # These are less frequently needed and change less often
+        counts, trigger_counts = await asyncio.gather(
+            limits_repo.get_all_limits_counts(account_id),
+            limits_repo.count_all_triggers_for_account(account_id)
+        )
+        # Use cached values for thread/project counts
+        counts['thread_count'] = thread_count_cached
+        counts['project_count'] = project_count_cached
+        logger.debug(f"[LIMITS] {account_id[:8]}... using Redis cache for thread/project counts")
+    else:
+        # Cache miss - fetch from DB and warm the cache
+        counts, trigger_counts = await asyncio.gather(
+            limits_repo.get_all_limits_counts(account_id),
+            limits_repo.count_all_triggers_for_account(account_id)
+        )
+        # Warm the Redis cache for next time
+        try:
+            from core.agents.pipeline.slot_manager import warm_all_caches
+            asyncio.create_task(warm_all_caches(
+                account_id,
+                thread_count=counts['thread_count'],
+                project_count=counts['project_count']
+            ))
+        except Exception:
+            pass
+
+    logger.info(f"[LIMITS] {account_id[:8]}... threads={counts['thread_count']}/{thread_limit} projects={counts['project_count']}/{project_limit} can_create_thread={counts['thread_count'] < thread_limit}")
+
+    logger.debug(f"⚡ All limits fetched in {(time.time() - t_start) * 1000:.1f}ms")
+    
+    return {
+        'threads': {
+            'current_count': counts['thread_count'],
+            'limit': thread_limit,
+            'can_create': counts['thread_count'] < thread_limit,
+            'tier_name': tier_name
+        },
+        'projects': {
+            'current_count': counts['project_count'],
+            'limit': project_limit,
+            'can_create': counts['project_count'] < project_limit,
+            'tier_name': tier_name
+        },
+        'agents': {
+            'current_count': counts['agent_count'],
+            'limit': agent_limit,
+            'can_create': counts['agent_count'] < agent_limit,
+            'tier_name': tier_name
+        },
+        'concurrent_runs': {
+            'running_count': counts['running_runs_count'],
+            'limit': concurrent_limit,
+            'can_start': counts['running_runs_count'] < concurrent_limit,
+            'tier_name': tier_name
+        },
+        'custom_mcps': {
+            'current_count': counts['custom_mcp_count'],
+            'limit': custom_mcp_limit,
+            'can_create': counts['custom_mcp_count'] < custom_mcp_limit,
+            'tier_name': tier_name
+        },
+        'triggers': {
+            'scheduled': {
+                'current_count': trigger_counts.get('scheduled', 0),
+                'limit': scheduled_trigger_limit,
+                'can_create': trigger_counts.get('scheduled', 0) < scheduled_trigger_limit
+            },
+            'app': {
+                'current_count': trigger_counts.get('app', 0),
+                'limit': app_trigger_limit,
+                'can_create': trigger_counts.get('app', 0) < app_trigger_limit
+            },
+            'tier_name': tier_name
+        }
+    }

@@ -210,7 +210,45 @@ class ToolkitService:
             for toolkit in toolkits:
                 if toolkit.slug == slug:
                     return toolkit
-            return None
+                    
+            try:
+                toolkit_response = self.client.toolkits.retrieve(slug)
+
+                if hasattr(toolkit_response, 'model_dump'):
+                    toolkit_dict = toolkit_response.model_dump()
+                elif hasattr(toolkit_response, '__dict__'):
+                    toolkit_dict = toolkit_response.__dict__
+                else:
+                    toolkit_dict = dict(toolkit_response)
+
+                meta = toolkit_dict.get('meta', {})
+                if hasattr(meta, '__dict__'):
+                    meta = meta.__dict__
+
+                logo_url = None
+                if isinstance(meta, dict):
+                    logo_url = meta.get('logo')
+                if not logo_url:
+                    logo_url = toolkit_dict.get('logo')
+
+                description = None
+                if isinstance(meta, dict):
+                    description = meta.get('description')
+                if not description:
+                    description = toolkit_dict.get('description')
+
+                return ToolkitInfo(
+                    slug=toolkit_dict.get('slug', slug),
+                    name=toolkit_dict.get('name', slug),
+                    description=description,
+                    logo=logo_url,
+                    tags=[],
+                    auth_schemes=toolkit_dict.get('auth_schemes', []),
+                    categories=[]
+                )
+            except Exception:
+                logger.debug(f"Direct toolkit retrieval also failed for {slug}")
+                return None
         except Exception as e:
             logger.error(f"Failed to get toolkit {slug}: {e}", exc_info=True)
             raise
@@ -246,26 +284,50 @@ class ToolkitService:
             raise
     
     async def get_toolkit_icon(self, toolkit_slug: str) -> Optional[str]:
+        """Get toolkit icon with Redis caching (24h TTL).
+        
+        Uses asyncio.to_thread for the sync Composio SDK call to enable
+        true parallel execution when called via asyncio.gather.
+        """
+        import asyncio
+        
         try:
-            # logger.debug(f"Fetching toolkit icon for: {toolkit_slug}")
-            toolkit_response = self.client.toolkits.retrieve(toolkit_slug)
+            from core.services import redis
+
+            cache_key = f"composio:icon:{toolkit_slug}"
+            try:
+                cached_icon = await redis.get(cache_key)
+                if cached_icon is not None:
+                    return cached_icon if cached_icon else None
+            except Exception as e:
+                logger.debug(f"Redis cache miss for toolkit icon {toolkit_slug}: {e}")
             
-            if hasattr(toolkit_response, 'model_dump'):
-                toolkit_dict = toolkit_response.model_dump()
-            elif hasattr(toolkit_response, '__dict__'):
-                toolkit_dict = toolkit_response.__dict__
-            else:
-                toolkit_dict = dict(toolkit_response)
+            # Fetch from Composio API - run sync SDK call in thread pool for true parallelism
+            def _fetch_icon_sync():
+                toolkit_response = self.client.toolkits.retrieve(toolkit_slug)
+                
+                if hasattr(toolkit_response, 'model_dump'):
+                    toolkit_dict = toolkit_response.model_dump()
+                elif hasattr(toolkit_response, '__dict__'):
+                    toolkit_dict = toolkit_response.__dict__
+                else:
+                    toolkit_dict = dict(toolkit_response)
+                
+                meta = toolkit_dict.get('meta', {})
+                if isinstance(meta, dict):
+                    return meta.get('logo')
+                elif hasattr(meta, '__dict__'):
+                    return meta.__dict__.get('logo')
+                return None
             
-            meta = toolkit_dict.get('meta', {})
-            if isinstance(meta, dict):
-                logo = meta.get('logo')
-            elif hasattr(meta, '__dict__'):
-                logo = meta.__dict__.get('logo')
-            else:
-                logo = None
+            logo = await asyncio.to_thread(_fetch_icon_sync)
             
-            # logger.debug(f"Successfully fetched icon for {toolkit_slug}: {logo}")
+            # Cache the result (24 hours TTL) - cache empty string if no logo
+            try:
+                await redis.set(cache_key, logo or "", ex=86400)  # 24 hours
+            except Exception as e:
+                logger.debug(f"Failed to cache toolkit icon {toolkit_slug}: {e}")
+            
             return logo
             
         except Exception as e:

@@ -11,6 +11,7 @@ import { Text } from '@/components/ui/text';
 import { Icon } from '@/components/ui/icon';
 import type { UserProfile } from './types';
 import * as Haptics from 'expo-haptics';
+import { log } from '@/lib/logger';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -33,8 +34,8 @@ interface ProfileSectionProps {
  * 
  * Features:
  * - Shows "Sign in" for guests, name for authenticated users
- * - Opens auth drawer for guests
- * - Opens settings drawer for authenticated users
+ * - Opens auth page for guests
+ * - Opens settings page for authenticated users
  * - Authenticated user data from Supabase
  * - Press animation with haptic feedback
  * - Guest mode support with clear call-to-action
@@ -45,7 +46,7 @@ export function ProfileSection({ profile, onPress }: ProfileSectionProps) {
   const scale = useSharedValue(1);
   
   // Get user data from auth context or fallback to profile prop
-  const userName = user?.user_metadata?.full_name || user?.email?.split('@')[0] || profile?.name || t('auth.guest');
+  const userName = user?.user_metadata?.full_name || user?.email?.split('@')[0] || profile?.name || t('auth.guest.label');
   const userAvatar = user?.user_metadata?.avatar_url || profile?.avatar;
   const isGuest = !user;
   
@@ -62,8 +63,8 @@ export function ProfileSection({ profile, onPress }: ProfileSectionProps) {
   };
   
   const handlePress = () => {
-    console.log('🎯 Profile section pressed - Opening settings');
-    console.log('📊 User:', { userName, isGuest });
+    log.log('🎯 Profile section pressed - Opening settings');
+    log.log('📊 User:', { userName, isGuest });
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     onPress?.();
   };

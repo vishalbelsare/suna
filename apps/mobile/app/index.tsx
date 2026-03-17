@@ -1,123 +1,144 @@
 import * as React from 'react';
-import { View, ActivityIndicator } from 'react-native';
+import { View, Text } from 'react-native';
 import { useRouter, Stack } from 'expo-router';
-import { useColorScheme } from 'nativewind';
-import { Text } from '@/components/ui/text';
-import LogomarkBlack from '@/assets/brand/Logomark-Black.svg';
-import LogomarkWhite from '@/assets/brand/Logomark-White.svg';
-import Animated, {
-  useAnimatedStyle,
-  withRepeat,
-  withTiming,
-  useSharedValue,
-  withSequence,
-  Easing,
-} from 'react-native-reanimated';
-import { useAuthContext } from '@/contexts';
+import { KortixLoader } from '@/components/ui';
+import { useAuthContext, useBillingContext } from '@/contexts';
 import { useOnboarding } from '@/hooks/useOnboarding';
-import { useBillingContext } from '@/contexts/BillingContext';
+import { usePushNotifications } from '@/hooks/usePushNotifications';
+import { log } from '@/lib/logger';
+
+// Safely import and configure expo-notifications
+let Notifications: typeof import('expo-notifications') | null = null;
+try {
+  Notifications = require('expo-notifications');
+  if (Notifications && Notifications.setNotificationHandler) {
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldPlaySound: false, // Commented out: was true
+        shouldSetBadge: true,
+        shouldShowBanner: true,
+        shouldShowList: true,
+      }),
+    });
+  }
+} catch (error) {
+  log.warn('expo-notifications module not available:', error);
+}
 
 /**
- * Splash Screen
+ * Splash/Decision Screen
  * 
- * Shown while checking authentication and billing status
- * Routes user to appropriate screen based on state:
- * - Not authenticated → Sign In
- * - Authenticated + Has subscription/trial → App
- * - Authenticated + No subscription/trial → Onboarding (includes billing)
- * 
- * Note: Billing status is the source of truth for onboarding completion
+ * This is the ONLY place that decides where to route users.
+ * Account initialization now happens automatically via backend webhook on signup,
+ * so most users will go directly to onboarding or home.
  */
 export default function SplashScreen() {
   const router = useRouter();
-  const { colorScheme } = useColorScheme();
   const { isAuthenticated, isLoading: authLoading } = useAuthContext();
   const { hasCompletedOnboarding, isLoading: onboardingLoading } = useOnboarding();
-  const { subscriptionData, trialStatus, isLoading: billingLoading } = useBillingContext();
-  const [isReady, setIsReady] = React.useState(false);
-
-  const Logomark = colorScheme === 'dark' ? LogomarkWhite : LogomarkBlack;
-
-  // Animated values for logo
-  const opacity = useSharedValue(0);
-  const scale = useSharedValue(0.8);
-
+  const { hasActiveSubscription, isLoading: billingLoading, subscriptionData } = useBillingContext();
+  const { expoPushToken } = usePushNotifications();
+  
+  // Log token status when it changes
   React.useEffect(() => {
-    // Animate logo in
-    opacity.value = withTiming(1, { duration: 600, easing: Easing.out(Easing.ease) });
-    scale.value = withSequence(
-      withTiming(1.05, { duration: 400, easing: Easing.out(Easing.ease) }),
-      withTiming(1, { duration: 200, easing: Easing.inOut(Easing.ease) })
-    );
+    if (expoPushToken) {
+      log.log('[SPLASH] ✅ expoPushToken available:', expoPushToken);
+    } else {
+      log.log('[SPLASH] ⚠️ expoPushToken is undefined (check [PUSH] logs for details)');
+    }
+  }, [expoPushToken]);
+  
+  // Track navigation to prevent double navigation
+  const [hasNavigated, setHasNavigated] = React.useState(false);
+  
+  // Reset navigation flag when component mounts (fresh visit to splash)
+  React.useEffect(() => {
+    setHasNavigated(false);
   }, []);
 
-  const logoStyle = useAnimatedStyle(() => ({
-    opacity: opacity.value,
-    transform: [{ scale: scale.value }],
-  }));
+  // Compute ready state
+  // - Auth must be done loading
+  // - If authenticated: billing must be done loading AND have data
+  // - Onboarding check must be done
+  const authReady = !authLoading;
+  const billingReady = !isAuthenticated || (!billingLoading && subscriptionData !== null);
+  const onboardingReady = !isAuthenticated || !onboardingLoading;
+  const allDataReady = authReady && billingReady && onboardingReady;
 
-  // Route user once we have all the info
+  // Status text for debugging
+  const getStatusText = () => {
+    if (!authReady) return 'Checking session...';
+    if (!isAuthenticated) return 'Redirecting...';
+    if (billingLoading) return 'Loading account...';
+    if (!subscriptionData) return 'Fetching subscription...';
+    if (onboardingLoading) return 'Checking setup...';
+    return 'Almost there...';
+  };
+
+  // Debug logging
   React.useEffect(() => {
-    if (!authLoading && !onboardingLoading && !billingLoading) {
-      // Small delay for smooth transition
-      setTimeout(() => {
-        if (!isAuthenticated) {
-          console.log('🔐 User not authenticated, routing to sign in');
-          router.replace('/auth');
-        } else {
-          // User is authenticated
-          // Check billing status as source of truth for onboarding completion
-          const hasActiveTrial = trialStatus?.has_trial && trialStatus?.trial_status === 'active';
-          const hasActiveSubscription =
-            subscriptionData?.tier && 
-            subscriptionData.tier.name !== 'none' && 
-            subscriptionData.tier.name !== 'free';
-          
-          const hasBillingSetup = hasActiveTrial || hasActiveSubscription;
+    log.log('📊 Splash:', {
+      authLoading,
+      isAuthenticated,
+      billingLoading,
+      subscriptionData: subscriptionData ? '✓' : '✗',
+      onboardingLoading,
+      hasCompletedOnboarding,
+      hasActiveSubscription,
+      allDataReady,
+      hasNavigated
+    });
+  }, [authLoading, isAuthenticated, billingLoading, subscriptionData, onboardingLoading, hasCompletedOnboarding, hasActiveSubscription, allDataReady, hasNavigated]);
 
-          console.log('🚦 Splash Screen Routing Decision:', {
-            isAuthenticated,
-            hasCompletedOnboarding,
-            hasActiveTrial,
-            hasActiveSubscription,
-            hasBillingSetup,
-            canStartTrial: trialStatus?.can_start_trial,
-          });
+  React.useEffect(() => {
+    // Don't navigate twice
+    if (hasNavigated) return;
+    
+    // Wait until all data is ready
+    if (!allDataReady) return;
 
-          // If user has billing setup, they've completed onboarding
-          if (hasBillingSetup) {
-            // Mark onboarding as completed if not already (for faster future loads)
-            if (!hasCompletedOnboarding) {
-              console.log('💡 User has billing, marking onboarding as completed');
-              const AsyncStorage = require('@react-native-async-storage/async-storage').default;
-              AsyncStorage.setItem('@onboarding_completed', 'true').catch(console.error);
-            }
-            console.log('✅ User has billing setup, routing to app');
-            router.replace('/home');
-          } else {
-            // No billing setup - need onboarding
-            console.log('👋 User needs onboarding (no billing setup), routing to onboarding');
-            router.replace('/onboarding');
-          }
-        }
-        setIsReady(true);
-      }, 800); // Minimum splash display time
-    }
-  }, [authLoading, onboardingLoading, billingLoading, isAuthenticated, hasCompletedOnboarding, subscriptionData, trialStatus, router]);
+    // Small delay to ensure React state is settled
+    const timer = setTimeout(() => {
+      if (hasNavigated) return;
+      setHasNavigated(true);
+
+      // ROUTING DECISION
+      if (!isAuthenticated) {
+        log.log('🚀 → /auth (not authenticated)');
+        router.replace('/auth');
+        return;
+      }
+
+      // User is authenticated
+      // PRIORITY: If user has completed onboarding, they've already been through 
+      // the full setup flow - go straight to home, regardless of subscription status.
+      // This prevents showing "Initializing Account" to users who already completed setup.
+      if (hasCompletedOnboarding) {
+        log.log('🚀 → /home (onboarding completed)');
+        router.replace('/home');
+      } else if (!hasActiveSubscription) {
+        // New user: Account initialization happens automatically via webhook on signup.
+        // Only show setting-up as a fallback if webhook failed or user signed up before this change.
+        log.log('🚀 → /setting-up (fallback: no subscription detected)');
+        router.replace('/setting-up');
+      } else {
+        // Has subscription but hasn't completed onboarding
+        log.log('🚀 → /onboarding');
+        router.replace('/onboarding');
+      }
+    }, 100);
+
+    return () => clearTimeout(timer);
+  }, [allDataReady, hasNavigated, isAuthenticated, hasActiveSubscription, hasCompletedOnboarding, router]);
 
   return (
     <>
       <Stack.Screen options={{ headerShown: false }} />
       <View className="flex-1 bg-background items-center justify-center">
-        <Animated.View style={logoStyle} className="items-center mb-8">
-          <Logomark width={240} height={48} />
-        </Animated.View>
-        
-        {!isReady && (
-          <View className="mt-8">
-            <ActivityIndicator size="large" color="hsl(var(--primary))" />
-          </View>
-        )}
+        <KortixLoader customSize={56} />
+        <Text className="text-muted-foreground text-sm mt-4">
+          {getStatusText()}
+        </Text>
       </View>
     </>
   );

@@ -1,96 +1,152 @@
 import { MenuPage, HomePage, ThreadPage } from '@/components/pages';
 import type { HomePageRef } from '@/components/pages/HomePage';
 import { useSideMenu, usePageNavigation, useChat, useAgentManager } from '@/hooks';
+import { useSystemStatus } from '@/hooks/useSystemStatus';
+import { useAdminRole } from '@/hooks/useAdminRole';
 import { useAuthContext } from '@/contexts';
-import { Stack, useRouter } from 'expo-router';
+import { Stack, useRouter, useLocalSearchParams } from 'expo-router';
 import { useColorScheme } from 'nativewind';
 import * as React from 'react';
-import { StatusBar as RNStatusBar } from 'react-native';
+import { StatusBar as RNStatusBar, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Drawer } from 'react-native-drawer-layout';
+import { useQueryClient } from '@tanstack/react-query';
 import type { Agent } from '@/api/types';
 import type { Conversation } from '@/components/menu/types';
+import { FeedbackDrawer } from '@/components/chat/tool-views/complete-tool/FeedbackDrawer';
+import { useFeedbackDrawerStore } from '@/stores/feedback-drawer-store';
+import { MaintenanceBanner, TechnicalIssueBanner, MaintenancePage } from '@/components/status';
+import { log } from '@/lib/logger';
 
-/**
- * Main App Screen with Drawer Navigation
- * 
- * Protected by root layout AuthProtection - requires authentication
- * 
- * Architecture:
- * - Drawer (left side): MenuPage (conversations, profile, navigation)
- * - Main Content: HomePage (default - chat interface)
- * 
- * Swipe Gestures:
- * - Swipe right from edge → Opens drawer (Menu)
- * - Swipe left on drawer → Closes drawer (returns to Home)
- * - Tap outside drawer → Closes drawer
- * 
- * The drawer is full-page and supports native swipe gestures
- */
 export default function AppScreen() {
+  const insets = useSafeAreaInsets();
   const { colorScheme } = useColorScheme();
   const { isAuthenticated } = useAuthContext();
   const router = useRouter();
-  const chat = useChat(); // SINGLE UNIFIED HOOK
+  const queryClient = useQueryClient();
+  const { threadId } = useLocalSearchParams<{ threadId?: string }>();
+  const chat = useChat();
   const pageNav = usePageNavigation();
+  const { isOpen: isFeedbackDrawerOpen } = useFeedbackDrawerStore();
   const homePageRef = React.useRef<HomePageRef>(null);
-  
-  // Handle new chat - starts new chat and closes drawer
+  const { data: systemStatus, refetch: refetchSystemStatus, isLoading: isSystemStatusLoading } = useSystemStatus();
+  const { data: adminRole } = useAdminRole();
+  const isAdmin = adminRole?.isAdmin ?? false;
+
+  const isMaintenanceActive = React.useMemo(() => {
+    const notice = systemStatus?.maintenanceNotice;
+    if (!notice?.enabled || !notice.startTime || !notice.endTime) {
+      return false;
+    }
+    const now = new Date();
+    const start = new Date(notice.startTime);
+    const end = new Date(notice.endTime);
+    return now >= start && now <= end;
+  }, [systemStatus?.maintenanceNotice]);
+
+  const isMaintenanceScheduled = React.useMemo(() => {
+    const notice = systemStatus?.maintenanceNotice;
+    if (!notice?.enabled || !notice.startTime || !notice.endTime) {
+      return false;
+    }
+    const now = new Date();
+    const start = new Date(notice.startTime);
+    return now < start;
+  }, [systemStatus?.maintenanceNotice]);
+
+  // Worker config drawer state for MenuPage
+  const [menuWorkerConfigWorkerId, setMenuWorkerConfigWorkerId] = React.useState<string | null>(
+    null
+  );
+  const [menuWorkerConfigInitialView, setMenuWorkerConfigInitialView] = React.useState<
+    'instructions' | 'tools' | 'integrations' | 'triggers' | undefined
+  >(undefined);
+
+  const canSendMessages = isAuthenticated;
+
+  // Load thread from URL parameter - only depend on threadId to prevent infinite loops
+  React.useEffect(() => {
+    if (threadId && threadId !== chat.activeThread?.id) {
+      log.log('🎯 Loading thread from URL parameter:', threadId);
+      chat.loadThread(threadId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadId]);
+
   const handleNewChat = React.useCallback(() => {
-    console.log('🆕 New Chat clicked - Starting new chat');
+    log.log('🆕 New Chat clicked - Starting new chat');
     chat.startNewChat();
     pageNav.closeDrawer();
-    
-    // Focus chat input after drawer closes
+
     setTimeout(() => {
-      console.log('🎯 Focusing chat input after new chat');
+      log.log('🎯 Focusing chat input after new chat');
       homePageRef.current?.focusChatInput();
-    }, 300); // Small delay to ensure drawer is closed
+    }, 300);
   }, [chat, pageNav]);
-  
-  // Handle agent selection - starts chat with specific agent
-  const handleAgentPress = React.useCallback((agent: Agent) => {
-    console.log('🤖 Agent selected:', agent.name);
-    console.log('📊 Starting chat with:', agent);
-    // TODO: Set the selected agent in chat thread
-    chat.startNewChat();
-    pageNav.closeDrawer();
-  }, [chat, pageNav]);
-  
+
+  const handleAgentPress = React.useCallback(
+    (agent: Agent) => {
+      log.log('🤖 Agent selected:', agent.name);
+      log.log('📊 Starting chat with:', agent);
+      chat.startNewChat();
+      pageNav.closeDrawer();
+    },
+    [chat, pageNav]
+  );
+
   const menu = useSideMenu({ onNewChat: handleNewChat });
   const agentManager = useAgentManager();
 
-  // Handle conversation click - load thread
-  const handleConversationPress = React.useCallback((conversation: Conversation) => {
-    console.log('📖 Loading thread:', conversation.id);
-    
-    // Load the thread
-    chat.loadThread(conversation.id);
-    
-    // Close drawer
-    pageNav.closeDrawer();
-  }, [chat, pageNav]);
+  const handleConversationPress = React.useCallback(
+    (conversation: Conversation) => {
+      log.log('📖 Loading thread:', conversation.id);
+      chat.loadThread(conversation.id);
+      pageNav.closeDrawer();
+    },
+    [chat, pageNav]
+  );
 
   const handleProfilePress = React.useCallback(() => {
-    console.log('🎯 Profile pressed');
+    log.log('🎯 Profile pressed');
     if (!isAuthenticated) {
-      console.log('🔐 User not authenticated, navigating to auth');
+      log.log('🔐 User not authenticated, redirecting to auth');
       router.push('/auth');
     } else {
       menu.handleProfilePress();
     }
   }, [isAuthenticated, menu, router]);
 
-  // Handle auth screen open - used when user tries protected actions
-  const handleOpenAuthScreen = React.useCallback(() => {
-    console.log('🔐 Opening auth screen');
-    router.push('/auth');
-  }, [router]);
+  // Handle opening worker config from AgentDrawer's Worker Settings buttons
+  const handleOpenWorkerConfigFromAgentDrawer = React.useCallback(
+    (workerId: string, view?: 'instructions' | 'tools' | 'integrations' | 'triggers') => {
+      log.log('🔧 [home] Opening worker config from AgentDrawer:', workerId, view);
+      // Close agent drawer and side menu drawer
+      agentManager.closeDrawer();
+      pageNav.closeDrawer();
+      // Wait for drawer animation to complete before navigating
+      setTimeout(() => {
+        // Navigate directly to the worker config page using push so there's a route to go back to
+        router.push({
+          pathname: '/worker-config',
+          params: { workerId, ...(view && { view }) },
+        });
+      }, 300);
+    },
+    [agentManager, pageNav, router]
+  );
+
+  // Handle closing worker config drawer in MenuPage
+  const handleCloseMenuWorkerConfig = React.useCallback(() => {
+    log.log('🔧 [home] Closing worker config in MenuPage');
+    setMenuWorkerConfigWorkerId(null);
+    setMenuWorkerConfigInitialView(undefined);
+  }, []);
 
   return (
     <>
       <Stack.Screen options={{ headerShown: false }} />
       <RNStatusBar barStyle={colorScheme === 'dark' ? 'light-content' : 'dark-content'} />
-      
+
       <Drawer
         open={pageNav.isDrawerOpen}
         onOpen={pageNav.handleDrawerOpen}
@@ -100,8 +156,8 @@ export default function AppScreen() {
           width: '100%',
           backgroundColor: 'transparent',
         }}
-        overlayStyle={{ 
-          backgroundColor: colorScheme === 'dark' ? 'rgba(0, 0, 0, 0.4)' : 'rgba(0, 0, 0, 0.2)'
+        overlayStyle={{
+          backgroundColor: colorScheme === 'dark' ? 'rgba(0, 0, 0, 0.4)' : 'rgba(0, 0, 0, 0.2)',
         }}
         swipeEnabled={true}
         swipeEdgeWidth={80}
@@ -114,11 +170,11 @@ export default function AppScreen() {
             activeTab={menu.activeTab}
             onNewChat={handleNewChat}
             onNewWorker={() => {
-              console.log('🤖 New Worker clicked');
+              log.log('🤖 New Worker clicked');
               pageNav.closeDrawer();
             }}
             onNewTrigger={() => {
-              console.log('⚡ New Trigger clicked');
+              log.log('⚡ New Trigger clicked');
               pageNav.closeDrawer();
             }}
             selectedAgentId={agentManager.selectedAgent?.agent_id}
@@ -129,27 +185,65 @@ export default function AppScreen() {
             onWorkersPress={menu.handleWorkersTabPress}
             onTriggersPress={menu.handleTriggersTabPress}
             onClose={pageNav.closeDrawer}
+            workerConfigWorkerId={menuWorkerConfigWorkerId}
+            workerConfigInitialView={menuWorkerConfigInitialView}
+            onCloseWorkerConfigDrawer={handleCloseMenuWorkerConfig}
           />
-        )}
-      >
-        {/* Main Content: Conditionally render HomePage or ThreadPage */}
-        {chat.hasActiveThread ? (
-          <ThreadPage
-            onMenuPress={pageNav.openDrawer}
-            chat={chat}
-            isAuthenticated={isAuthenticated}
-            onOpenAuthDrawer={handleOpenAuthScreen}
-          />
-        ) : (
-          <HomePage
-            ref={homePageRef}
-            onMenuPress={pageNav.openDrawer}
-            chat={chat}
-            isAuthenticated={isAuthenticated}
-            onOpenAuthDrawer={handleOpenAuthScreen}
-          />
-        )}
+        )}>
+        <View className="flex-1">
+          {isMaintenanceActive ? (
+            <MaintenancePage 
+              onRefresh={() => refetchSystemStatus()}
+              isRefreshing={isSystemStatusLoading}
+            />
+          ) : (
+            <>
+              {chat.hasActiveThread ? (
+                <ThreadPage
+                  onMenuPress={pageNav.openDrawer}
+                  chat={chat}
+                  isAuthenticated={canSendMessages}
+                  onOpenWorkerConfig={handleOpenWorkerConfigFromAgentDrawer}
+                />
+              ) : (
+                <View className="flex-1">
+                  <HomePage
+                    ref={homePageRef}
+                    onMenuPress={pageNav.openDrawer}
+                    chat={chat}
+                    isAuthenticated={canSendMessages}
+                    onOpenWorkerConfig={handleOpenWorkerConfigFromAgentDrawer}
+                    showThreadListView={false}
+                  />
+                  {(isMaintenanceScheduled || (systemStatus?.technicalIssue?.enabled && systemStatus.technicalIssue.message)) && (
+                    <View style={{ position: 'absolute', top: insets.top + 60, left: 0, right: 0 }}>
+                      {isMaintenanceScheduled && systemStatus?.maintenanceNotice?.startTime && systemStatus.maintenanceNotice.endTime && (
+                        <MaintenanceBanner
+                          startTime={systemStatus.maintenanceNotice.startTime}
+                          endTime={systemStatus.maintenanceNotice.endTime}
+                          updatedAt={systemStatus.updatedAt}
+                        />
+                      )}
+                      {systemStatus?.technicalIssue?.enabled && systemStatus.technicalIssue.message && (
+                        <TechnicalIssueBanner
+                          message={systemStatus.technicalIssue.message}
+                          statusUrl={systemStatus.technicalIssue.statusUrl}
+                          description={systemStatus.technicalIssue.description}
+                          estimatedResolution={systemStatus.technicalIssue.estimatedResolution}
+                          severity={systemStatus.technicalIssue.severity}
+                          affectedServices={systemStatus.technicalIssue.affectedServices}
+                          updatedAt={systemStatus.updatedAt}
+                        />
+                      )}
+                    </View>
+                  )}
+                </View>
+              )}
+            </>
+          )}
+        </View>
       </Drawer>
+      {isFeedbackDrawerOpen && <FeedbackDrawer />}
     </>
   );
 }

@@ -11,6 +11,7 @@ import * as Haptics from 'expo-haptics';
 import { Text } from '@/components/ui/text';
 import { Icon } from '@/components/ui/icon';
 import { MessageCircle, Briefcase, Zap } from 'lucide-react-native';
+import { log } from '@/lib/logger';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -93,7 +94,7 @@ interface NavButtonProps {
  * - Text: 15px font-roobert-medium
  * - Active: Filled background (bg-card) with border
  * - Inactive: Subtle background with transparency
- * - Border radius: 20px (rounded-[20px])
+ * - Border radius: 16px (rounded-2xl)
  * - Press animation: Scale to 0.98
  * - Gap: 8px (gap-2) between icon and label
  * 
@@ -119,16 +120,16 @@ function NavButton({ icon, label, isActive = false, onPress }: NavButtonProps) {
   };
   
   const handlePress = () => {
-    console.log('🎯 Bottom nav tab pressed:', label);
-    console.log('📊 Active state:', isActive);
-    console.log('⏰ Timestamp:', new Date().toISOString());
+    log.log('🎯 Bottom nav tab pressed:', label);
+    log.log('📊 Active state:', isActive);
+    log.log('⏰ Timestamp:', new Date().toISOString());
     
     // Haptic feedback
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     
     // Don't trigger if already active
     if (isActive) {
-      console.log('ℹ️ Tab already active, skipping callback');
+      log.log('ℹ️ Tab already active, skipping callback');
       return;
     }
     
@@ -141,7 +142,7 @@ function NavButton({ icon, label, isActive = false, onPress }: NavButtonProps) {
       onPressIn={handlePressIn}
       onPressOut={handlePressOut}
       style={animatedStyle}
-      className={`flex-1 items-center justify-center rounded-[20px] h-24 ${
+      className={`flex-1 items-center justify-center rounded-2xl h-24 ${
         isActive 
           ? 'bg-card border-[1.5px] border-border' 
           : 'bg-card/30'

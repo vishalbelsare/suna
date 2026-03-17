@@ -3,14 +3,24 @@ import asyncio
 import structlog
 import json
 from decimal import Decimal
-from exa_py import Exa
-from exa_py.websets.types import CreateWebsetParameters, CreateEnrichmentParameters
+
+# exa-py removed due to openai 2.x incompatibility - tool disabled
+try:
+    from exa_py import Exa
+    from exa_py.websets.types import CreateWebsetParameters, CreateEnrichmentParameters
+    EXA_AVAILABLE = True
+except ImportError:
+    EXA_AVAILABLE = False
+    Exa = None
+    CreateWebsetParameters = None
+    CreateEnrichmentParameters = None
+
 from core.agentpress.tool import Tool, ToolResult, openapi_schema, tool_metadata
 from core.utils.config import config, EnvMode
 from core.utils.logger import logger
 from core.agentpress.thread_manager import ThreadManager
-from core.billing.credit_manager import CreditManager
-from core.billing.config import TOKEN_PRICE_MULTIPLIER
+from core.billing.credits.manager import CreditManager
+from core.billing.shared.config import TOKEN_PRICE_MULTIPLIER
 from core.services.supabase import DBConnection
 
 @tool_metadata(
@@ -19,14 +29,49 @@ from core.services.supabase import DBConnection
     icon="Building",
     color="bg-slate-100 dark:bg-slate-800/50",
     weight=260,
-    visible=True
+    visible=True,
+    usage_guide="""
+### SPECIALIZED COMPANY SEARCH
+
+**⚠️ COST: $0.54 per search (returns 10 results)**
+
+**🔴 MANDATORY: ALWAYS ASK FOR CONFIRMATION BEFORE USING THIS TOOL**
+
+**WORKFLOW - NO EXCEPTIONS:**
+1. **CLARIFY:** Ask 3-5 specific questions
+   - Industry/sector specifics
+   - Location preferences
+   - Company stage/size
+   - Technology focus
+   - Other criteria
+2. **REFINE:** Build detailed search query
+3. **CONFIRM:** Show query + cost, ask for "yes"
+4. **WAIT:** Wait for confirmation
+5. **EXECUTE:** Only then use company_search
+
+**SEARCH QUERY BEST PRACTICES:**
+- Use natural language to describe company criteria
+- Include industry, location, size, or relevant factors
+- Examples:
+  - "AI startups in San Francisco with Series A funding"
+  - "E-commerce companies in Austin with 50-200 employees"
+  - "Healthcare technology companies in Boston"
+
+**ENRICHMENT:**
+- Results include company information, websites, and details
+
+**NEVER:**
+- Call without clarifying questions first
+- Proceed without explicit confirmation
+- Use vague queries - specificity is critical
+"""
 )
 class CompanySearchTool(Tool):
     def __init__(self, thread_manager: ThreadManager):
         super().__init__()
         self.thread_manager = thread_manager
         self.api_key = config.EXA_API_KEY
-        self.db = DBConnection()
+        self.db = thread_manager.db if thread_manager else DBConnection()
         self.credit_manager = CreditManager()
         self.exa_client = None
         
@@ -81,7 +126,7 @@ class CompanySearchTool(Tool):
         "type": "function",
         "function": {
             "name": "company_search",
-            "description": "Search for companies using natural language queries and enrich with company profiles. IMPORTANT: This search costs $0.54 per search (10 results).",
+            "description": "Search for companies using natural language queries and enrich with company profiles. IMPORTANT: This search costs 54 credits per search (10 results).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -259,16 +304,16 @@ class CompanySearchTool(Tool):
             
             if config.ENV_MODE == EnvMode.LOCAL:
                 logger.info("Running in LOCAL mode - skipping billing for company search")
-                cost_deducted_str = f"${total_cost:.2f} (LOCAL - not charged)"
+                cost_deducted_str = f"{int(total_cost * 100)} credits (LOCAL - not charged)"
             else:
                 credits_deducted = await self._deduct_credits(user_id, len(formatted_results), thread_id)
                 if not credits_deducted:
                     return self.fail_response(
                         "Insufficient credits for company search. "
-                        f"This search costs ${total_cost:.2f} ({len(formatted_results)} results). "
+                        f"This search costs {int(total_cost * 100)} credits ({len(formatted_results)} results). "
                         "Please add credits to continue."
                     )
-                cost_deducted_str = f"${total_cost:.2f}"
+                cost_deducted_str = f"{int(total_cost * 100)} credits"
             
             output = {
                 "query": query,

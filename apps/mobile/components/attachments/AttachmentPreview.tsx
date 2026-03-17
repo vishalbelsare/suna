@@ -1,6 +1,6 @@
 import { Icon } from '@/components/ui/icon';
 import { Text } from '@/components/ui/text';
-import { FileText, X, Loader2, AlertCircle } from 'lucide-react-native';
+import { FileText, X, AlertCircle } from 'lucide-react-native';
 import { useColorScheme } from 'nativewind';
 import * as React from 'react';
 import { Image, Pressable, View, ActivityIndicator } from 'react-native';
@@ -12,6 +12,7 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 import type { Attachment } from '@/hooks/useChat';
+import { log } from '@/lib/logger';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 const AnimatedView = Animated.createAnimatedComponent(View);
@@ -64,7 +65,7 @@ function AttachmentItem({ attachment, index, onRemove }: AttachmentItemProps) {
   }));
 
   const handleRemove = () => {
-    console.log('🗑️ Removing attachment:', {
+    log.log('🗑️ Removing attachment:', {
       type: attachment.type,
       name: attachment.name || 'unnamed',
       index,
@@ -90,7 +91,7 @@ function AttachmentItem({ attachment, index, onRemove }: AttachmentItemProps) {
       >
         {/* Image/Video Preview */}
         {(attachment.type === 'image' || attachment.type === 'video') && (
-          <View className="relative rounded-xl overflow-hidden border border-border bg-card">
+          <View className="relative rounded-2xl overflow-hidden border border-border bg-card">
             <Image
               source={{ uri: attachment.uri }}
               style={{ width: 80, height: 80 }}
@@ -132,7 +133,7 @@ function AttachmentItem({ attachment, index, onRemove }: AttachmentItemProps) {
 
         {/* Document Preview */}
         {attachment.type === 'document' && (
-          <View className="rounded-xl overflow-hidden border border-border bg-card p-3" style={{ width: 80, height: 80 }}>
+          <View className="rounded-2xl overflow-hidden border border-border bg-card p-3" style={{ width: 80, height: 80 }}>
             <View className="flex-1 items-center justify-center">
               {!isUploading && !hasError && (
                 <>

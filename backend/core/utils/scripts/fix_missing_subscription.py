@@ -7,15 +7,15 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 
-backend_dir = Path(__file__).parent.parent.parent
+backend_dir = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(backend_dir))
 
 import stripe
 from core.services.supabase import DBConnection
 from core.utils.config import config
 from core.utils.logger import logger
-from billing.config import get_tier_by_price_id, is_commitment_price_id, get_commitment_duration_months
-from billing.credit_manager import credit_manager
+from core.billing.shared.config import get_tier_by_price_id, is_commitment_price_id, get_commitment_duration_months
+from core.billing.credits.manager import credit_manager
 
 stripe.api_key = config.STRIPE_SECRET_KEY
 
@@ -68,7 +68,7 @@ async def fix_missing_subscription(user_email: str):
     
     active_sub = None
     for sub in subscriptions.data:
-        if sub.status in ['active', 'trialing']:
+        if sub.status in ['active', 'trialing', 'past_due']:
             full_sub = await stripe.Subscription.retrieve_async(
                 sub.id,
                 expand=['items.data.price', 'schedule']
@@ -77,7 +77,7 @@ async def fix_missing_subscription(user_email: str):
             break
     
     if not active_sub:
-        logger.error("❌ No active or trialing subscription found")
+        logger.error("❌ No active, trialing, or past_due subscription found")
         logger.info("\nAll subscriptions:")
         for sub in subscriptions.data:
             logger.info(f"  - {sub.id}: {sub.status}")
@@ -88,6 +88,8 @@ async def fix_missing_subscription(user_email: str):
     logger.info(f"\nActive subscription found:")
     logger.info(f"  ID: {subscription.id}")
     logger.info(f"  Status: {subscription.status}")
+    if subscription.status == 'past_due':
+        logger.info(f"  ⚠️  GRACE PERIOD: Payment failed, Stripe will retry automatically")
     logger.info(f"  Created: {datetime.fromtimestamp(subscription.created).isoformat()}")
     logger.info(f"  Current period: {datetime.fromtimestamp(subscription.current_period_start).isoformat()} to {datetime.fromtimestamp(subscription.current_period_end).isoformat()}")
     
@@ -249,6 +251,16 @@ async def fix_missing_subscription(user_email: str):
         logger.info(f"  Start date: {start_date.date()}")
         logger.info(f"  End date: {end_date.date()}")
         logger.info(f"  Duration: 12 months")
+    else:
+        update_data.update({
+            'commitment_type': None,
+            'commitment_start_date': None,
+            'commitment_end_date': None,
+            'commitment_price_id': None,
+            'can_cancel_after': None
+        })
+        
+        logger.info(f"Clearing commitment data (this is a regular monthly subscription)")
     
     await client.from_('credit_accounts').upsert(
         {**update_data, 'account_id': account_id},

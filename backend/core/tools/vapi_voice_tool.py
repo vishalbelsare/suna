@@ -1,7 +1,6 @@
 from typing import Optional, Dict, Any, List
 import json
 import asyncio
-import httpx
 import phonenumbers
 from phonenumbers import NumberParseException, geocoder
 import structlog
@@ -10,8 +9,9 @@ from core.agentpress.tool import Tool, ToolResult, openapi_schema, tool_metadata
 from core.utils.config import config
 from core.agentpress.thread_manager import ThreadManager
 from core.utils.logger import logger
-from core.vapi_config import vapi_config, DEFAULT_SYSTEM_PROMPT, DEFAULT_FIRST_MESSAGE
-from core.billing.config import TOKEN_PRICE_MULTIPLIER
+from core.services.http_client import get_http_client
+from core.config.vapi_config import vapi_config, DEFAULT_SYSTEM_PROMPT, DEFAULT_FIRST_MESSAGE
+from core.billing.shared.config import TOKEN_PRICE_MULTIPLIER
 
 def normalize_phone_number(raw_number: str, default_region: str = "US") -> tuple[str, str, str]:
     import re
@@ -281,7 +281,29 @@ def validate_call_safety(phone_number: str, first_message: str, system_prompt: O
     icon="Phone",
     color="bg-indigo-100 dark:bg-indigo-800/50",
     weight=280,
-    visible=True
+    visible=True,
+    usage_guide="""
+### VOICE CALL CAPABILITIES
+
+**CORE FUNCTIONS:**
+- Create AI voice agents for phone calls
+- Configure voice, personality, and conversation flow
+- Make outbound calls to phone numbers
+- Handle inbound calls with AI responses
+
+**USE CASES:**
+- Customer service automation
+- Appointment scheduling
+- Survey collection
+- Lead qualification
+- Information delivery via phone
+
+**BEST PRACTICES:**
+- Configure clear voice instructions
+- Test with small batches first
+- Provide fallback options
+- Respect calling regulations
+"""
 )
 class VapiVoiceTool(Tool):
     
@@ -323,9 +345,7 @@ class VapiVoiceTool(Tool):
 
             if not user_id and thread_id:
                 try:
-                    from core.services.supabase import DBConnection
-                    db = DBConnection()
-                    client = await db.client
+                    client = await self.thread_manager.db.client
                     thread = await client.from_('threads').select('account_id').eq('thread_id', thread_id).single().execute()
                     if thread.data:
                         user_id = thread.data.get('account_id')
@@ -394,9 +414,10 @@ class VapiVoiceTool(Tool):
                 return self.fail_response(safety_message_normalized)
             
             thread_id, user_id, agent_id = await self._get_current_thread_and_user()
+            
             safety_guidelines = "\n\nETHICAL GUIDELINES (MANDATORY):\n- NEVER request sensitive personal information (SSN, passwords, credit card numbers, bank accounts, PINs)\n- NEVER discuss illegal activities, threats, or emergency services\n- NEVER impersonate government agencies, law enforcement, or financial institutions\n- NEVER create urgency to manipulate the recipient into taking immediate action\n- NEVER request payments, transfers, or financial transactions\n- Be respectful, honest, and transparent about being an AI assistant"
             
-            country_context = f"\n\nIMPORTANT: You are calling a phone number in {country_name} (country code +{country_code}). Please be aware of potential cultural differences, time zones, and language preferences."
+            country_context = f"\n\nIMPORTANT: You are calling a phone number in {country_name} (country code +{country_code}). Be aware of cultural differences and time zones. The system will automatically detect and adapt to the caller's language."
             
             if system_prompt:
                 enhanced_system_prompt = system_prompt + country_context + safety_guidelines
@@ -416,8 +437,8 @@ class VapiVoiceTool(Tool):
                 "assistant": assistant_config
             }
             
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
+            async with get_http_client() as http_client:
+                response = await http_client.post(
                     f"{self.base_url}/call/phone",
                     headers=self._get_headers(),
                     json=payload,
@@ -427,9 +448,7 @@ class VapiVoiceTool(Tool):
                 response.raise_for_status()
                 call_data = response.json()
             
-            from core.services.supabase import DBConnection
-            db = DBConnection()
-            client = await db.client
+            client = await self.thread_manager.db.client
             
             call_id = call_data.get("id")
             
@@ -474,7 +493,7 @@ class VapiVoiceTool(Tool):
                     await self.thread_manager.add_message(
                         thread_id=thread_id,
                         type="assistant",
-                        content=f"📞 **Initiating call to {normalized_phone}**\n🌍 **Country: {country_name}**\n\nCall ID: `{call_id[:8]}...`\n\nThe conversation will appear here in real-time as it happens.",
+                        content=f"📞 **Initiating call to {normalized_phone}**\n🌍 **Country: {country_name}**\n🗣️ **Multilingual Support: Enabled**\n\nCall ID: `{call_id[:8]}...`\n\nThe AI agent will automatically detect and speak the caller's language. The conversation will appear here in real-time as it happens.",
                         is_llm_message=False,
                         metadata={
                             "call_id": call_id,
@@ -482,6 +501,7 @@ class VapiVoiceTool(Tool):
                             "phone_number": normalized_phone,
                             "country": country_name,
                             "country_code": f"+{country_code}",
+                            "multilingual": True,
                             "source": "vapi_voice_tool"
                         }
                     )
@@ -498,9 +518,10 @@ class VapiVoiceTool(Tool):
                 "original_number": phone_number,
                 "country": country_name,
                 "country_code": f"+{country_code}",
-                "message": f"Call initiated successfully to {normalized_phone} ({country_name}). Call ID: {call_id}",
+                "multilingual": True,
+                "message": f"Call initiated successfully to {normalized_phone} ({country_name}). The AI agent will automatically detect and speak the caller's language. Call ID: {call_id}",
                 "next_action": "MONITOR_CALL",
-                "instructions": f"The call has been initiated. Now use wait_for_call_completion with call_id: {call_id} to monitor the call until it ends and see the real-time conversation."
+                "instructions": f"The call has been initiated with automatic multilingual support. Now use wait_for_call_completion with call_id: {call_id} to monitor the call until it ends and see the real-time conversation."
             }
             
             return self.success_response(result)
@@ -538,8 +559,8 @@ class VapiVoiceTool(Tool):
             return self.fail_response("VAPI_PRIVATE_KEY not configured")
         
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.patch(
+            async with get_http_client() as http_client:
+                response = await http_client.patch(
                     f"{self.base_url}/call/{call_id}",
                     headers=self._get_headers(),
                     json={"status": "ended"},
@@ -548,9 +569,7 @@ class VapiVoiceTool(Tool):
                 
                 response.raise_for_status()
             
-            from core.services.supabase import DBConnection
-            db = DBConnection()
-            client = await db.client
+            client = await self.thread_manager.db.client
             
             await client.table("vapi_calls").update({
                 "status": "ended",
@@ -594,8 +613,8 @@ class VapiVoiceTool(Tool):
             return self.fail_response("VAPI_PRIVATE_KEY not configured")
         
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
+            async with get_http_client() as http_client:
+                response = await http_client.get(
                     f"{self.base_url}/call/{call_id}",
                     headers=self._get_headers(),
                     timeout=30.0
@@ -656,9 +675,7 @@ class VapiVoiceTool(Tool):
             return self.fail_response("VAPI_PRIVATE_KEY not configured")
         
         try:
-            from core.services.supabase import DBConnection
-            db = DBConnection()
-            client = await db.client
+            client = await self.thread_manager.db.client
             
             thread_id, user_id, agent_id = await self._get_current_thread_and_user()
             
@@ -729,7 +746,7 @@ class VapiVoiceTool(Tool):
 
 **Status**: {status}
 **Duration**: {duration} seconds
-**Credits Used**: ${credits_deducted:.4f}
+**Credits Used**: {int(credits_deducted * 100)} credits
 **Call ID**: `{call_id[:8]}...`
 
 The voice call has ended. You can continue with any follow-up actions."""
@@ -795,9 +812,7 @@ The voice call has ended. You can continue with any follow-up actions."""
         try:
             thread_id, user_id, agent_id = await self._get_current_thread_and_user()
             
-            from core.services.supabase import DBConnection
-            db = DBConnection()
-            client = await db.client
+            client = await self.thread_manager.db.client
             
             query = client.table("vapi_calls").select("*").order("created_at", desc=True).limit(limit)
             

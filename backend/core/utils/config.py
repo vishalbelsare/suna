@@ -1,22 +1,5 @@
-"""
-Configuration management.
-
-This module provides a centralized way to access configuration settings and
-environment variables across the application. It supports different environment
-modes (development, staging, production) and provides validation for required
-values.
-
-Usage:
-    from core.utils.config import config
-    
-    # Access configuration values
-    api_key = config.OPENAI_API_KEY
-    env_mode = config.ENV_MODE
-"""
-
 import os
 from enum import Enum
-from re import S
 from typing import Dict, Any, Optional, get_type_hints, Union
 from dotenv import load_dotenv
 import logging
@@ -25,18 +8,11 @@ import secrets
 logger = logging.getLogger(__name__)
 
 class SafeConfigWrapper:
-    """
-    A safe wrapper around the Configuration class that prevents NoneType AttributeErrors.
-    This ensures that even if the underlying config is None, we can still access attributes
-    without crashing the application.
-    """
-    
     def __init__(self, config_instance=None):
         self._config = config_instance
         self._defaults = {}
     
     def __getattr__(self, name):
-        """Safely get attribute from config, returning None if not found or config is None."""
         if self._config is None:
             logger.debug(f"Config is None, returning None for attribute: {name}")
             return None
@@ -48,7 +24,6 @@ class SafeConfigWrapper:
             return None
     
     def __setattr__(self, name, value):
-        """Set attribute on the underlying config if it exists."""
         if name.startswith('_'):
             super().__setattr__(name, value)
         elif self._config is not None:
@@ -57,31 +32,42 @@ class SafeConfigWrapper:
             logger.debug(f"Cannot set {name} because config is None")
     
     def __bool__(self):
-        """Return True if config is loaded, False otherwise."""
         return self._config is not None
     
     def __repr__(self):
-        """String representation."""
         return f"SafeConfigWrapper(config={'loaded' if self._config else 'None'})"
 
 class EnvMode(Enum):
-    """Environment mode enumeration."""
     LOCAL = "local"
     STAGING = "staging"
     PRODUCTION = "production"
 
 class Configuration:
-    """
-    Centralized configuration for AgentPress backend.
-    
-    This class loads environment variables and provides type checking and validation.
-    Default values can be specified for optional configuration items.
-    """
-    
-    # Environment mode
     ENV_MODE: Optional[EnvMode] = EnvMode.LOCAL
+
+    AGENT_XML_TOOL_CALLING: bool = False      # Enable XML-based tool calls (<function_calls>)
+    AGENT_NATIVE_TOOL_CALLING: bool = True  # Enable OpenAI-style native function calling
+    AGENT_EXECUTE_ON_STREAM: bool = True     # Execute tools as they stream (vs. at end)
+    AGENT_TOOL_EXECUTION_STRATEGY: str = "parallel"  # "parallel" or "sequential"
     
+    # Model selection
+    # Options: "bedrock", "anthropic", "minimax", "grok", "openai"
+    MAIN_LLM: str = "bedrock"
+    # Optional: Override the default model for the selected provider
+    # If not set, uses the default model for the provider:
+    #   - anthropic: anthropic/claude-haiku-4-5-20251001
+    #   - grok: openrouter/x-ai/grok-4.1-fast
+    #   - openai: openrouter/openai/gpt-4o-mini
+    #   - minimax: openrouter/minimax/minimax-m2.1
+    MAIN_LLM_MODEL: Optional[str] = None
+    # ============================================
     
+    # ===== PRESENCE CONFIGURATION =====
+    DISABLE_PRESENCE: bool = True  # Disable presence tracking entirely
+    # ==================================
+    
+    SYSTEM_ADMIN_USER_ID: Optional[str] = None  # User ID that owns shared/fallback agents
+
     # Subscription tier IDs - Production
     STRIPE_FREE_TIER_ID_PROD: Optional[str] = 'price_1RILb4G6l1KZGqIrK4QLrx9i'
     STRIPE_TIER_2_20_ID_PROD: Optional[str] = 'price_1RILb4G6l1KZGqIrhomjgDnO'
@@ -294,9 +280,25 @@ class Configuration:
             return self.STRIPE_CREDITS_500_PRICE_ID_STAGING
         return self.STRIPE_CREDITS_500_PRICE_ID_PROD
     
+    # Google Analytics (GA4) - for visitor tracking in admin dashboard
+    GA_PROPERTY_ID: Optional[str] = None  # GA4 Property ID (numeric, e.g., "516492562")
+    GA_CREDENTIALS_JSON: Optional[str] = None  # Service account JSON credentials (as string or file path)
+    
+    # Vercel Analytics (via drains) - primary source of truth for visitor tracking
+    VERCEL_DRAIN_SECRET: Optional[str] = None  # Secret for authenticating Vercel drain webhooks
+
     # LLM API keys
     ANTHROPIC_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
+    
+    ENABLE_MEMORY: bool = False
+    ENABLE_KNOWLEDGE_BASE: bool = True
+    ENABLE_USER_CONTEXT: bool = True
+    ACTIVATE_MCPS_TRIG: bool = True
+    MEMORY_EMBEDDING_PROVIDER: Optional[str] = "openai"
+    MEMORY_EMBEDDING_MODEL: Optional[str] = "text-embedding-3-small"
+    MEMORY_EXTRACTION_MODEL: Optional[str] = "kortix/basic"
+    VOYAGE_API_KEY: Optional[str] = None
     GROQ_API_KEY: Optional[str] = None
     OPENROUTER_API_KEY: Optional[str] = None
     XAI_API_KEY: Optional[str] = None
@@ -305,8 +307,11 @@ class Configuration:
     OPENROUTER_API_BASE: Optional[str] = "https://openrouter.ai/api/v1"
     OPENAI_COMPATIBLE_API_KEY: Optional[str] = None
     OPENAI_COMPATIBLE_API_BASE: Optional[str] = None
-    OR_SITE_URL: Optional[str] = "https://kortix.ai"
-    OR_APP_NAME: Optional[str] = "Kortix AI"    
+    OR_SITE_URL: Optional[str] = "https://www.kortix.com"
+    OR_APP_NAME: Optional[str] = "Kortix.com"
+    
+    # Frontend URL configuration
+    FRONTEND_URL_ENV: Optional[str] = None
     
     # AWS Bedrock authentication
     AWS_BEARER_TOKEN_BEDROCK: Optional[str] = None
@@ -317,10 +322,11 @@ class Configuration:
     SUPABASE_SERVICE_ROLE_KEY: str
     SUPABASE_JWT_SECRET: str
     
-    # Redis configuration
     REDIS_HOST: Optional[str] = "localhost"
     REDIS_PORT: Optional[int] = 6379
     REDIS_PASSWORD: Optional[str] = None
+    REDIS_USERNAME: Optional[str] = None  
+    REDIS_MAX_CONNECTIONS: Optional[int] = 300
     REDIS_SSL: Optional[bool] = True
     
     # Daytona sandbox configuration (optional - sandbox features disabled if not configured)
@@ -338,6 +344,15 @@ class Configuration:
     EXA_API_KEY: Optional[str] = None
     SEMANTIC_SCHOLAR_API_KEY: Optional[str] = None
     
+    # Reality Defender deepfake detection
+    REALITY_DEFENDER_API_KEY: Optional[str] = None
+    
+    # Apify integration
+    APIFY_API_TOKEN: Optional[str] = None
+    
+    # Replicate API for image models
+    REPLICATE_API_TOKEN: Optional[str] = None
+    
     VAPI_PRIVATE_KEY: Optional[str] = None
     VAPI_PHONE_NUMBER_ID: Optional[str] = None
     VAPI_SERVER_URL: Optional[str] = None
@@ -351,14 +366,34 @@ class Configuration:
     STRIPE_DEFAULT_PLAN_ID: Optional[str] = None
     STRIPE_DEFAULT_TRIAL_DAYS: Optional[int] = 14
     
+    # RevenueCat configuration
+    REVENUECAT_WEBHOOK_SECRET: Optional[str] = None
+    REVENUECAT_API_KEY: Optional[str] = None
+    REVENUECAT_PROJECT_ID: Optional[str] = None
+    
     # Stripe Product IDs
     STRIPE_PRODUCT_ID_PROD: Optional[str] = 'prod_SCl7AQ2C8kK1CD'
     STRIPE_PRODUCT_ID_STAGING: Optional[str] = 'prod_SCgIj3G7yPOAWY'
     
     # Sandbox configuration
-    SANDBOX_IMAGE_NAME = "kortix/suna:0.1.3.23"
-    SANDBOX_SNAPSHOT_NAME = "kortix/suna:0.1.3.23"
+    SANDBOX_IMAGE_NAME = "kortix/suna:0.1.3.30"
+    SANDBOX_SNAPSHOT_NAME = "kortix/suna:0.1.3.30"
     SANDBOX_ENTRYPOINT = "/usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord.conf"
+    
+    # Debug configuration
+    # Set to True to save LLM API call inputs and stream outputs to debug_streams/ directory
+    # Always False in production, regardless of environment variable
+    _DEBUG_SAVE_LLM_IO: Optional[bool] = False
+    
+    @property
+    def DEBUG_SAVE_LLM_IO(self) -> bool:
+        """
+        Debug flag to save LLM API call inputs and stream outputs.
+        Always returns False in production, regardless of environment variable.
+        """
+        if self.ENV_MODE == EnvMode.PRODUCTION:
+            return False
+        return self._DEBUG_SAVE_LLM_IO or False
 
     # LangFuse configuration
     LANGFUSE_PUBLIC_KEY: Optional[str] = None
@@ -382,6 +417,7 @@ class Configuration:
     # Webhook configuration
     WEBHOOK_BASE_URL: Optional[str] = None
     TRIGGER_WEBHOOK_SECRET: Optional[str] = None
+    SUPABASE_WEBHOOK_SECRET: Optional[str] = None  # Secret for Supabase database webhook authentication
     
     # Email configuration
     
@@ -391,7 +427,7 @@ class Configuration:
     # Agent limits per billing tier
     # Note: These limits are bypassed in local mode (ENV_MODE=local) where unlimited agents are allowed
     AGENT_LIMITS = {
-        'free': 2,
+        'free': 0,
         'tier_2_20': 5,
         'tier_6_50': 20,
         'tier_12_100': 20,
@@ -468,6 +504,28 @@ class Configuration:
             return self.STRIPE_PRODUCT_ID_STAGING
         return self.STRIPE_PRODUCT_ID_PROD
     
+    @property
+    def FRONTEND_URL(self) -> str:
+        """
+        Get the frontend URL based on environment.
+        
+        Returns:
+        - Production: 'https://kortix.com' (or FRONTEND_URL_ENV if set)
+        - Staging: 'https://staging.kortix.com' (or FRONTEND_URL_ENV if set)
+        - Local: FRONTEND_URL_ENV or 'http://localhost:3000'
+        """
+        # Check for environment variable override first
+        if self.FRONTEND_URL_ENV:
+            return self.FRONTEND_URL_ENV
+        
+        # Environment-based defaults
+        if self.ENV_MODE == EnvMode.PRODUCTION:
+            return 'https://kortix.com'
+        elif self.ENV_MODE == EnvMode.STAGING:
+            return 'http://localhost:3000'
+        else:
+            return 'http://localhost:3000'
+    
     def _generate_admin_api_key(self) -> str:
         """Generate a secure admin API key for Kortix administrative functions."""
         # Generate 32 random bytes and encode as hex for a readable API key
@@ -538,6 +596,16 @@ class Configuration:
         max_parallel_runs_env = os.getenv("MAX_PARALLEL_AGENT_RUNS")
         if max_parallel_runs_env is not None:
             self._MAX_PARALLEL_AGENT_RUNS_ENV = max_parallel_runs_env
+        
+        # Custom handling for frontend URL
+        frontend_url_env = os.getenv("FRONTEND_URL")
+        if frontend_url_env is not None:
+            self.FRONTEND_URL_ENV = frontend_url_env
+        
+        # Custom handling for DEBUG_SAVE_LLM_IO (always False in production)
+        debug_save_llm_io_env = os.getenv("DEBUG_SAVE_LLM_IO")
+        if debug_save_llm_io_env is not None:
+            self._DEBUG_SAVE_LLM_IO = debug_save_llm_io_env.lower() in ('true', 't', 'yes', 'y', '1')
     
     def _validate(self):
         """Validate configuration based on type hints."""

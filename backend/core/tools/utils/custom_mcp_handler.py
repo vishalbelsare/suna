@@ -10,8 +10,9 @@ from .mcp_connection_manager import MCPConnectionManager
 
 
 class CustomMCPHandler:
-    def __init__(self, connection_manager: MCPConnectionManager):
+    def __init__(self, connection_manager: MCPConnectionManager, account_id: str = None):
         self.connection_manager = connection_manager
+        self.account_id = account_id
         self.custom_tools = {}
     
     async def initialize_custom_mcps(self, custom_configs: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -70,7 +71,7 @@ class CustomMCPHandler:
             
             db = DBConnection()
             profile_service = ComposioProfileService(db)
-            mcp_url = await profile_service.get_mcp_url_for_runtime(profile_id)
+            mcp_url = await profile_service.get_mcp_url_for_runtime(profile_id, account_id=self.account_id)
             
             logger.debug(f"Resolved Composio profile {profile_id} to MCP URL")
 
@@ -81,10 +82,10 @@ class CustomMCPHandler:
                     tools = tools_result.tools if hasattr(tools_result, 'tools') else tools_result
                     
                     self._register_custom_tools(tools, server_name, enabled_tools, 'composio', server_config)
-                    logger.debug(f"Registered {len(tools)} tools from Composio MCP {server_name}")
             
         except Exception as e:
             logger.error(f"Failed to initialize Composio MCP {server_name}: {str(e)}")
+            raise
     
     async def _initialize_sse_mcp(self, server_name: str, server_config: Dict[str, Any], enabled_tools: List[str]):
         if 'url' not in server_config:
@@ -138,7 +139,7 @@ class CustomMCPHandler:
             
             result = await supabase.table('user_mcp_credential_profiles').select(
                 'encrypted_config'
-            ).eq('profile_id', profile_id).single().execute()
+            ).eq('profile_id', profile_id).eq('account_id', self.account_id).single().execute()
             
             if result.data:
                 decrypted_config = decrypt_data(result.data['encrypted_config'])
@@ -200,9 +201,6 @@ class CustomMCPHandler:
                     'custom_config': server_config
                 }
                 tools_registered += 1
-                logger.debug(f"Registered custom tool: {tool_name}")
-        
-        logger.debug(f"Successfully initialized custom MCP {server_name} with {tools_registered} tools")
     
     def get_custom_tools(self) -> Dict[str, Dict[str, Any]]:
         return self.custom_tools.copy() 
